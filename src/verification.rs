@@ -1,0 +1,150 @@
+//! # Verification Suite & Reproducible Input Generation
+//!
+//! Provides deterministic, reproducible test vectors and independent verification oracles
+//! to guarantee that all population-counting implementations produce bit-for-bit identical results.
+
+use crate::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
+
+/// Deterministic 64-bit XorShift pseudorandom generator.
+///
+/// Ensures test sequences are completely reproducible across all platforms
+/// without introducing external dependencies.
+#[derive(Debug, Clone)]
+pub struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    /// Seed the generator with a fixed 64-bit constant.
+    pub const fn new(seed: u64) -> Self {
+        // State must be non-zero for xorshift64
+        let state = if seed == 0 { 0xCAFE_BABE_DEAD_BEEF } else { seed };
+        Self { state }
+    }
+
+    /// Produce the next pseudo-random 64-bit unsigned integer.
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+}
+
+/// A named reproducible test vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestVector {
+    pub name: &'static str,
+    pub value: u64,
+    pub expected_count: u32,
+}
+
+/// Generate the standard suite of deterministic test vectors:
+/// - Zero
+/// - Maximum value (`u64::MAX`)
+/// - All 64 single-bit patterns (`1 << 0` to `1 << 63`)
+/// - Alternating bit patterns (even bits, odd bits, nibble alternating, byte alternating)
+pub fn generate_standard_test_vectors() -> Vec<TestVector> {
+    let mut vectors = Vec::new();
+
+    // 1. Boundary cases
+    vectors.push(TestVector {
+        name: "Zero (No bits set)",
+        value: 0,
+        expected_count: 0,
+    });
+    vectors.push(TestVector {
+        name: "Max u64 (All 64 bits set)",
+        value: u64::MAX,
+        expected_count: 64,
+    });
+
+    // 2. All 64 single-bit isolated patterns
+    for i in 0..64 {
+        vectors.push(TestVector {
+            name: "Single bit set",
+            value: 1u64 << i,
+            expected_count: 1,
+        });
+    }
+
+    // 3. Alternating bit patterns
+    vectors.push(TestVector {
+        name: "Alternating bits: 0x5555_5555_5555_5555 (32 bits set, even positions)",
+        value: 0x5555_5555_5555_5555,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating bits: 0xAAAA_AAAA_AAAA_AAAA (32 bits set, odd positions)",
+        value: 0xAAAA_AAAA_AAAA_AAAA,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating pairs: 0x3333_3333_3333_3333 (32 bits set)",
+        value: 0x3333_3333_3333_3333,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating nibbles: 0x0F0F_0F0F_0F0F_0F0F (32 bits set)",
+        value: 0x0F0F_0F0F_0F0F_0F0F,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating bytes: 0x00FF_00FF_00FF_00FF (32 bits set)",
+        value: 0x00FF_00FF_00FF_00FF,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating words: 0x0000_FFFF_0000_FFFF (32 bits set)",
+        value: 0x0000_FFFF_0000_FFFF,
+        expected_count: 32,
+    });
+    vectors.push(TestVector {
+        name: "Alternating dwords: 0x0000_0000_FFFF_FFFF (32 bits set)",
+        value: 0x0000_0000_FFFF_FFFF,
+        expected_count: 32,
+    });
+
+    vectors
+}
+
+/// Independent reference oracle that calculates population count by formatting the integer
+/// as a binary string and counting '1' characters.
+///
+/// This provides a completely independent validation path that relies neither on bitwise
+/// arithmetic loops nor the standard library `count_ones()` intrinsic.
+pub fn independent_string_oracle(n: u64) -> u32 {
+    format!("{:b}", n).chars().filter(|&c| c == '1').count() as u32
+}
+
+/// Result of verifying a test input against all three algorithms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationResult {
+    pub input: u64,
+    pub naive_result: u32,
+    pub kernighan_result: u32,
+    pub reference_result: u32,
+    pub oracle_result: u32,
+    pub all_agree: bool,
+}
+
+/// Run an input through all counting implementations and confirm unanimous agreement.
+pub fn verify_input(n: u64) -> VerificationResult {
+    let naive = popcount_naive(n);
+    let kernighan = popcount_kernighan(n);
+    let reference = popcount_reference(n);
+    let oracle = independent_string_oracle(n);
+
+    let all_agree = (naive == kernighan) && (kernighan == reference) && (reference == oracle);
+
+    VerificationResult {
+        input: n,
+        naive_result: naive,
+        kernighan_result: kernighan,
+        reference_result: reference,
+        oracle_result: oracle,
+        all_agree,
+    }
+}
