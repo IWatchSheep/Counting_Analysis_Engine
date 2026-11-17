@@ -1825,4 +1825,274 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    // --- CAE-1E Phase 3: Deterministic Prediction Scoring & Calibration Tests ---
+
+    #[test]
+    fn test_deterministic_evaluator_exact_matches_across_calibration_suite() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let evidence_list = NativeTraceEvidence::populate_standard_calibration_evidence();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        let correct_preds: Vec<_> = preds
+            .iter()
+            .filter(|(_, verdict)| *verdict == ScientificVerdict::VerifiedPrediction)
+            .collect();
+
+        assert_eq!(correct_preds.len(), 6, "Must have exactly 6 correct calibration predictions");
+
+        for (pred, expected_verdict) in correct_preds {
+            let exp = exps.iter().find(|e| e.experiment_id == pred.experiment_id()).unwrap();
+            let ev_idx = match pred.experiment_id() {
+                "CAE-1E-CAL-001" => 0,
+                "CAE-1E-CAL-002" => 1,
+                "CAE-1E-CAL-003" => 2,
+                "CAE-1E-CAL-004" => 3,
+                "CAE-1E-CAL-005" => 4,
+                "CAE-1E-CAL-006" => 5,
+                _ => panic!("Unknown calibration experiment"),
+            };
+            let ev = &evidence_list[ev_idx];
+
+            let report = DeterministicPredictionEvaluator::evaluate(exp, pred, Some(ev), false);
+
+            assert_eq!(report.scientific_verdict, *expected_verdict, "Verdict mismatch for {}", pred.prediction_id());
+            assert_eq!(report.backedge_status, BackedgeEvaluationStatus::ExactMatch, "Backedge mismatch for {}", pred.prediction_id());
+            assert!(report.evaluation_points.iter().all(|p| p.status.is_exact_match()), "All points must match exactly for {}", pred.prediction_id());
+            assert_eq!(report.evaluation_points.len(), 5);
+            assert!(!report.evidence_disclosed_prior_to_prediction);
+
+            let table = report.render_markdown_table();
+            assert!(table.contains("EXACT MATCH"));
+            assert!(table.contains("VerifiedPrediction"));
+        }
+    }
+
+    #[test]
+    fn test_deterministic_evaluator_detects_semantic_failure() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let evidence_list = NativeTraceEvidence::populate_standard_calibration_evidence();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        // 1. Release Naive predicting loop with 64 backedges and 585+3k
+        let (pred_unrolled_failure, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-002-FLAWED").unwrap();
+        let exp2 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-002").unwrap();
+        let ev2 = &evidence_list[1];
+
+        let rep2 = DeterministicPredictionEvaluator::evaluate(exp2, pred_unrolled_failure, Some(ev2), false);
+        assert_eq!(rep2.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert!(matches!(rep2.backedge_status, BackedgeEvaluationStatus::Discrepancy { .. }));
+        assert!(rep2.verdict_explanation.contains("completely unrolled"));
+
+        // 2. Release Kernighan predicting baseline 9+13k
+        let (pred_baseline_failure, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-004-BASELINE").unwrap();
+        let exp4 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-004").unwrap();
+        let ev4 = &evidence_list[3];
+
+        let rep4 = DeterministicPredictionEvaluator::evaluate(exp4, pred_baseline_failure, Some(ev4), false);
+        assert_eq!(rep4.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert!(rep4.evaluation_points.iter().any(|p| !p.status.is_exact_match()));
+    }
+
+    #[test]
+    fn test_deterministic_evaluator_detects_feature_assumption_mismatch() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let evidence_list = NativeTraceEvidence::populate_standard_calibration_evidence();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        let (pred_popcnt_mismatch, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-006-FLAWED").unwrap();
+        let exp6 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-006").unwrap();
+        let ev6 = &evidence_list[5];
+
+        let report = DeterministicPredictionEvaluator::evaluate(exp6, pred_popcnt_mismatch, Some(ev6), false);
+        assert_eq!(report.scientific_verdict, ScientificVerdict::FeatureAssumptionMismatch);
+        assert!(report.verdict_explanation.contains("hardware POPCNT"));
+        assert!(report.verdict_explanation.contains("software bitwise reduction tree"));
+    }
+
+    #[test]
+    fn test_deterministic_evaluator_handles_abstention_and_unknown() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let evidence_list = NativeTraceEvidence::populate_standard_calibration_evidence();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        // Abstention
+        let (pred_abstain, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-ABSTAIN").unwrap();
+        let exp1 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-001").unwrap();
+        let rep_abstain = DeterministicPredictionEvaluator::evaluate(exp1, pred_abstain, Some(&evidence_list[0]), false);
+        assert_eq!(rep_abstain.scientific_verdict, ScientificVerdict::UnsupportedEvaluation);
+        assert!(rep_abstain.evaluation_points.iter().all(|p| matches!(p.status, InputEvaluationStatus::Abstention { .. })));
+
+        // Unknown
+        let (pred_unknown, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-UNKNOWN").unwrap();
+        let exp3 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-003").unwrap();
+        let rep_unknown = DeterministicPredictionEvaluator::evaluate(exp3, pred_unknown, Some(&evidence_list[2]), false);
+        assert_eq!(rep_unknown.scientific_verdict, ScientificVerdict::UnsupportedEvaluation);
+        assert!(rep_unknown.evaluation_points.iter().all(|p| matches!(p.status, InputEvaluationStatus::UnknownPrediction { .. })));
+    }
+
+    #[test]
+    fn test_deterministic_evaluator_handles_missing_trace_evidence_without_fabrication() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        let (pred_correct, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-001-CORRECT").unwrap();
+        let exp1 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-001").unwrap();
+
+        // Pass evidence: None
+        let report = DeterministicPredictionEvaluator::evaluate(exp1, pred_correct, None, false);
+        assert_eq!(report.scientific_verdict, ScientificVerdict::UnsupportedEvaluation);
+        assert_eq!(report.backedge_status, BackedgeEvaluationStatus::MissingObservation);
+        assert!(report.evaluation_points.iter().all(|p| p.observed_count.is_none()));
+        assert!(report.verdict_explanation.contains("unavailable"));
+        assert!(report.verdict_explanation.contains("no physical observations were fabricated"));
+    }
+
+    #[test]
+    fn test_deterministic_evaluator_detects_post_hoc_rationalization() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let evidence_list = NativeTraceEvidence::populate_standard_calibration_evidence();
+        let preds = PredictionRecord::populate_standard_calibration_predictions();
+
+        let (pred_correct, _) = preds.iter().find(|(p, _)| p.prediction_id() == "PRED-CAL-001-CORRECT").unwrap();
+        let exp1 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-001").unwrap();
+
+        // Evaluated with prior disclosure = true
+        let report = DeterministicPredictionEvaluator::evaluate(exp1, pred_correct, Some(&evidence_list[0]), true);
+        assert_eq!(report.scientific_verdict, ScientificVerdict::PostHocRationalization);
+        assert!(report.evidence_disclosed_prior_to_prediction);
+        assert!(report.discrepancy_summary.contains("Post-hoc rationalization"));
+    }
+
+    #[test]
+    fn test_evaluator_backedge_discrimination_distinguishes_joins_from_headers() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let exp1 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-001").unwrap();
+
+        // Naive debug evidence: 64 loop header backedges, 96 total backward branches (for k=32)
+        let ev1 = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Debug".to_string(),
+            test_inputs_evaluated: vec![0x5555_5555_5555_5555],
+            observed_instruction_counts: vec![(0x5555_5555_5555_5555, 4908)],
+            loop_header_backedges_observed: Some(64),
+            total_backward_branches_observed: Some(96),
+            key_register_states_observed: vec!["RAX=32".to_string()],
+            trace_artifact_reference: "trace_debug_naive.txt".to_string(),
+        };
+
+        // 1. Prediction asserting exactly 64 header backedges
+        let mut pred_64 = PredictionRecord::new_draft(
+            "PRED-HDR-64",
+            "CAE-1E-CAL-001",
+            "Model-64",
+            "Predicts 64 header backedges",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Linear { intercept: 4652, slope: 8 },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "64".to_string(),
+                    backward_join_branches: Some("k".to_string()),
+                },
+                register_roles: vec![],
+                confidence_percent: Some(95),
+                notes_and_rationale: "Distinguishes 64 header backedges from join branches.".to_string(),
+            },
+            "2026-11-17T12:00:00Z",
+        );
+        pred_64.freeze().unwrap();
+
+        let rep_64 = DeterministicPredictionEvaluator::evaluate(exp1, &pred_64, Some(&ev1), false);
+        assert_eq!(rep_64.backedge_status, BackedgeEvaluationStatus::ExactMatch);
+
+        // 2. Flawed prediction conflating total backward branches (96) with header backedges
+        let mut pred_96 = PredictionRecord::new_draft(
+            "PRED-HDR-96",
+            "CAE-1E-CAL-001",
+            "Model-96",
+            "Predicts 96 header backedges (conflating joins with header)",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Linear { intercept: 4652, slope: 8 },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "96".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![],
+                confidence_percent: Some(90),
+                notes_and_rationale: "Conflates join jumps with loop header backedges.".to_string(),
+            },
+            "2026-11-17T12:00:00Z",
+        );
+        pred_96.freeze().unwrap();
+
+        let rep_96 = DeterministicPredictionEvaluator::evaluate(exp1, &pred_96, Some(&ev1), false);
+        assert!(matches!(rep_96.backedge_status, BackedgeEvaluationStatus::Discrepancy { .. }));
+    }
+
+    #[test]
+    fn test_durable_storage_end_to_end_evaluation_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_e2e_eval_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let exp4 = exps.iter().find(|e| e.experiment_id == "CAE-1E-CAL-004").unwrap();
+        store.save_experiment(exp4).expect("Save experiment must succeed");
+
+        let mut pred = PredictionRecord::new_draft(
+            "PRED-E2E-001",
+            "CAE-1E-CAL-004",
+            "Evaluation-Lifecycle-Model",
+            "Predicts release Kernighan piecewise model 4 for k=0, 5+5k for k>=1",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::PiecewisePopcount {
+                    zero_case: 4,
+                    non_zero_intercept: 5,
+                    non_zero_slope: 5,
+                },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "k-1".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![],
+                confidence_percent: Some(100),
+                notes_and_rationale: "End-to-end evaluation lifecycle verification test.".to_string(),
+            },
+            "2026-11-17T12:00:00Z",
+        );
+        pred.freeze().expect("Freeze must succeed");
+        let orig_canonical_sha256 = pred.canonical_sha256().to_string();
+
+        // 1. Initial save in Frozen state
+        store.save_prediction(&pred).expect("Initial save of frozen prediction must succeed");
+
+        // 2. Evaluate using DeterministicPredictionEvaluator
+        let ev4 = NativeTraceEvidence::populate_standard_calibration_evidence().into_iter().find(|e| e.compiler_profile == "Release" && e.observed_instruction_counts.iter().any(|(i, c)| *i == 0 && *c == 4)).unwrap();
+        let report = DeterministicPredictionEvaluator::evaluate(exp4, &pred, Some(&ev4), false);
+        assert_eq!(report.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+
+        // 3. Mark prediction Verified and update store (Frozen -> Verified)
+        pred.mark_verified().expect("Transition to Verified must succeed");
+        store.save_prediction(&pred).expect("Saving Verified prediction must succeed");
+
+        // 4. Append Evidence Record to store
+        let evidence_record = report.to_evidence_record("EV-E2E-001", "2026-11-17T12:15:00Z", Some(ev4));
+        store.append_evidence(&evidence_record).expect("Append evidence must succeed");
+
+        // 5. Mark prediction Archived and update store (Verified -> Archived)
+        pred.archive().expect("Transition to Archived must succeed");
+        store.save_prediction(&pred).expect("Saving Archived prediction must succeed");
+
+        // 6. Reload from disk and verify immutability and complete preservation
+        let reloaded_pred = store.load_prediction("PRED-E2E-001").expect("Reload prediction must succeed");
+        assert_eq!(reloaded_pred.state(), PredictionState::Archived);
+        assert_eq!(reloaded_pred.canonical_sha256(), orig_canonical_sha256);
+        assert!(reloaded_pred.verify_integrity());
+
+        let reloaded_ev = store.load_evidence("EV-E2E-001").expect("Reload evidence must succeed");
+        assert_eq!(reloaded_ev.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+        assert_eq!(reloaded_ev.prediction_id, "PRED-E2E-001");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 }

@@ -1,5 +1,9 @@
 #![allow(non_snake_case)]
 
+use Counting_Analysis_Engine::llm_protocol::{
+    DeterministicPredictionEvaluator, ExperimentDefinition, NativeTraceEvidence, PredictionRecord,
+};
+
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
 use Counting_Analysis_Engine::archive::{InterpretationArchive, OptimizationArchive};
 use Counting_Analysis_Engine::dynamic_analysis::measure_dynamic_kernel;
@@ -792,7 +796,36 @@ fn main() {
     println!("     compiled programs, which involve compiler prologue/epilogue frames, indirect calls, external CRT/runtime");
     println!("     helpers, dynamic link libraries, and complex multi-threaded scheduling.\n");
 
+    // 8. CAE-1E Phase 3: Deterministic Prediction Scoring & Known-Answer Calibration
+    println!("--- [Phase 8: Deterministic Prediction Scoring & Known-Answer Calibration (CAE-1E Phase 3)] ---\n");
+    let cal_experiments = ExperimentDefinition::populate_standard_calibration_experiments();
+    let cal_evidence = NativeTraceEvidence::populate_standard_calibration_evidence();
+    let cal_predictions = PredictionRecord::populate_standard_calibration_predictions();
+
+    println!("Executing Deterministic Calibration Scoring across {} experiments and {} test predictions...\n", cal_experiments.len(), cal_predictions.len());
+
+    for (pred, expected_verdict) in &cal_predictions {
+        if let Some(exp) = cal_experiments.iter().find(|e| e.experiment_id == pred.experiment_id()) {
+            let ev = cal_evidence.iter().find(|e| {
+                let kernel_match = match exp.target_kernel_name.as_str() {
+                    "popcount_naive" => e.trace_artifact_reference.contains("naive"),
+                    "popcount_kernighan" => e.trace_artifact_reference.contains("kernighan"),
+                    "popcount_reference" => e.trace_artifact_reference.contains("reference"),
+                    _ => false,
+                };
+                kernel_match && e.compiler_profile == exp.compiler_profile
+            });
+
+            let report = DeterministicPredictionEvaluator::evaluate(exp, pred, ev, false);
+            println!("{}", report.render_markdown_table());
+            println!("Summary Verdict: [{}] Expected: {} | Observed: {} (Match: {})
+",
+                pred.prediction_id(), expected_verdict, report.scientific_verdict, report.scientific_verdict == *expected_verdict
+            );
+        }
+    }
+
     println!("================================================================================");
-    println!("CAE-1D Phase 4 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1E Phase 3 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }
