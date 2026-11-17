@@ -6,6 +6,7 @@
 
 pub mod algorithms;
 pub mod archive;
+pub mod dynamic_analysis;
 pub mod instrumentation;
 pub mod report;
 pub mod static_analysis;
@@ -15,6 +16,7 @@ pub mod verification;
 mod tests {
     use super::algorithms::*;
     use super::archive::*;
+    use super::dynamic_analysis::*;
     use super::instrumentation::*;
     use super::static_analysis::*;
     use super::verification::*;
@@ -113,13 +115,6 @@ mod tests {
 
     #[test]
     fn test_address_stride_contraindication_avoids_false_positive() {
-        // Synthetic machine code representing an address stride loop:
-        // loop:
-        //   mov eax, [rdi]
-        //   lea rdi, [rdi + 8]
-        //   dec ecx
-        //   jnz loop
-        //   ret
         #[rustfmt::skip]
         let code_bytes: &[u8] = &[
             0x8B, 0x07,             // mov eax, [rdi]
@@ -132,7 +127,6 @@ mod tests {
         let profile = disassemble_buffer("synthetic_pointer_stride", code_bytes, 0x1000).unwrap();
         assert_eq!(profile.loops.len(), 1, "Must detect 1 static loop");
 
-        // RDI must be classified as AddressStride due to [rdi] memory dereference
         let rdi_candidate = profile.candidate_accumulators.iter().find(|c| c.register_name == "RDI");
         assert!(rdi_candidate.is_some(), "RDI must be analyzed as a candidate");
         let rdi = rdi_candidate.unwrap();
@@ -143,21 +137,13 @@ mod tests {
 
     #[test]
     fn test_disassemble_live_functions() {
-        // Disassemble the three actual compiled functions from their live entry points
         let naive_profile = disassemble_function_pointer("popcount_naive", popcount_naive as *const (), 256).unwrap();
         let kernighan_profile = disassemble_function_pointer("popcount_kernighan", popcount_kernighan as *const (), 256).unwrap();
         let reference_profile = disassemble_function_pointer("popcount_reference", popcount_reference as *const (), 256).unwrap();
 
-        println!("--- DEBUG DISASSEMBLY popcount_naive ---");
-        for instr in &naive_profile.instructions {
-            println!("{:#X}: {} {}", instr.ip, instr.mnemonic_str, instr.operands_str);
-        }
-
         assert!(naive_profile.total_instructions > 0);
         assert!(kernighan_profile.total_instructions > 0);
         assert!(reference_profile.total_instructions > 0);
-
-        // Reference implementation should have zero loops
         assert_eq!(reference_profile.loops.len(), 0, "Reference popcount has no static loops");
     }
 
@@ -171,5 +157,49 @@ mod tests {
 
         assert_eq!(correct_count, 5);
         assert_eq!(false_pos_avoided_count, 1);
+    }
+
+    #[test]
+    fn test_dynamic_measurement_preserves_correctness() {
+        let test_inputs = [0u64, 1, 0x5555_5555_5555_5555, u64::MAX];
+        for &input in &test_inputs {
+            let (naive_res, _) = measure_dynamic_kernel("popcount_naive", input, popcount_naive);
+            let (kern_res, _) = measure_dynamic_kernel("popcount_kernighan", input, popcount_kernighan);
+            let (ref_res, _) = measure_dynamic_kernel("popcount_reference", input, popcount_reference);
+
+            assert_eq!(naive_res, input.count_ones());
+            assert_eq!(kern_res, input.count_ones());
+            assert_eq!(ref_res, input.count_ones());
+        }
+    }
+
+    #[test]
+    fn test_known_dynamic_instruction_step_scaling() {
+        // Kernighan must scale dynamically with number of set bits k
+        let k0 = step_count_kernighan(0);
+        let k1 = step_count_kernighan(1);
+        let k32 = step_count_kernighan(0x5555_5555_5555_5555);
+        let k64 = step_count_kernighan(u64::MAX);
+
+        assert!(k0 < k1);
+        assert!(k1 < k32);
+        assert!(k32 < k64);
+
+        // Reference must be constant
+        assert_eq!(step_count_reference(0), step_count_reference(u64::MAX));
+    }
+
+    #[test]
+    fn test_optimization_archive_integrity() {
+        let opt_archive = OptimizationArchive::populate_cae1c_findings();
+        assert_eq!(opt_archive.entries.len(), 4);
+
+        let accepted = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Accepted { .. }));
+        let cond_accepted = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::ConditionallyAccepted { .. }));
+        let rejected = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Rejected { .. }));
+
+        assert!(accepted, "Archive must contain accepted optimizations");
+        assert!(cond_accepted, "Archive must contain conditionally accepted optimizations");
+        assert!(rejected, "Archive must contain rejected optimizations");
     }
 }

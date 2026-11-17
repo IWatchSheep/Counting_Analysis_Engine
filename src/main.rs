@@ -1,8 +1,9 @@
 #![allow(non_snake_case)]
 
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
-use Counting_Analysis_Engine::archive::InterpretationArchive;
-use Counting_Analysis_Engine::report::{SingleInputReport, StaticAssemblyReport};
+use Counting_Analysis_Engine::archive::{InterpretationArchive, OptimizationArchive};
+use Counting_Analysis_Engine::dynamic_analysis::measure_dynamic_kernel;
+use Counting_Analysis_Engine::report::{SingleInputReport, StaticAssemblyReport, UnifiedThreeTierReport};
 use Counting_Analysis_Engine::static_analysis::disassemble_function_pointer;
 use Counting_Analysis_Engine::verification::{
     generate_standard_test_vectors, verify_exhaustive_16bit_subdomain, verify_input,
@@ -11,7 +12,7 @@ use Counting_Analysis_Engine::verification::{
 
 fn main() {
     println!("================================================================================");
-    println!("           Counting Analysis Engine (CAE) — Milestone CAE-1B Execution          ");
+    println!("           Counting Analysis Engine (CAE) — Milestone CAE-1C Execution          ");
     println!("================================================================================");
     println!("Guiding Philosophy: Discover what is counted, audit how it is counted,");
     println!("critique its efficiency, and synthesize verified improvements.\n");
@@ -64,43 +65,64 @@ fn main() {
         println!("PASSED: 1,000 deterministic pseudorandom samples verified unanimously (EmpiricalSampled).\n");
     }
 
-    // 3. Generate Comparative Reports for Representative Inputs (Tier 1)
-    println!("--- [Phase 3: Tier 1 Source-Level Operation Accounting Reports] ---\n");
+    // 3. Pre-compute Static Assembly Profiles (Tier 2: iced-x86)
+    println!("--- [Phase 3: Static Machine Code Profiling (Tier 2)] ---");
+    let naive_static =
+        disassemble_function_pointer("popcount_naive", popcount_naive as *const (), 512)
+            .expect("Failed to disassemble popcount_naive");
+    let kernighan_static =
+        disassemble_function_pointer("popcount_kernighan", popcount_kernighan as *const (), 512)
+            .expect("Failed to disassemble popcount_kernighan");
+    let reference_static =
+        disassemble_function_pointer("popcount_reference", popcount_reference as *const (), 512)
+            .expect("Failed to disassemble popcount_reference");
+
+    println!("Static assembly profiles generated via iced-x86 with .pdata boundary resolution.\n");
+
+    // 4. Generate Unified Three-Tier Comparison Reports (Tiers 1, 2, and 3)
+    println!("--- [Phase 4: Unified Three-Tier Experiment Reports] ---\n");
 
     let sample_cases = [
-        ("Single Bit Set (Sparse)", 0x0000_0000_0000_0001u64),
-        ("Alternating Bits (32 set)", 0x5555_5555_5555_5555u64),
-        ("All Bits Set (Dense)", u64::MAX),
+        ("Single Bit Set (Sparse: 1 bit)", 0x0000_0000_0000_0001u64),
+        ("Alternating Bits (Balanced: 32 bits)", 0x5555_5555_5555_5555u64),
+        ("All Bits Set (Dense: 64 bits)", u64::MAX),
     ];
 
     for (description, val) in sample_cases {
         println!("## Case: {}", description);
-        let report = SingleInputReport::generate(val);
-        println!("{}", report.render_markdown_table());
+        let source_report = SingleInputReport::generate(val);
+        let static_report = StaticAssemblyReport::new(
+            naive_static.clone(),
+            kernighan_static.clone(),
+            reference_static.clone(),
+        );
+
+        let (_, naive_dyn) = measure_dynamic_kernel("popcount_naive", val, popcount_naive);
+        let (_, kern_dyn) = measure_dynamic_kernel("popcount_kernighan", val, popcount_kernighan);
+        let (_, ref_dyn) = measure_dynamic_kernel("popcount_reference", val, popcount_reference);
+
+        let unified_report = UnifiedThreeTierReport::new(
+            val,
+            source_report,
+            static_report,
+            naive_dyn,
+            kern_dyn,
+            ref_dyn,
+        );
+
+        println!("{}", unified_report.render_markdown_table());
     }
 
-    // 4. Static Assembly Analysis (Tier 2: iced-x86)
-    println!("--- [Phase 4: Tier 2 Static Compiled Assembly Inspection (iced-x86)] ---\n");
+    // 5. Dual-Track Archives: Optimization Archive + Interpretation Archive
+    println!("--- [Phase 5: Optimization Archive (Code Transformations)] ---\n");
+    let opt_archive = OptimizationArchive::populate_cae1c_findings();
+    println!("{}", opt_archive.render_markdown_table());
 
-    let naive_profile =
-        disassemble_function_pointer("popcount_naive", popcount_naive as *const (), 512)
-            .expect("Failed to disassemble popcount_naive");
-    let kernighan_profile =
-        disassemble_function_pointer("popcount_kernighan", popcount_kernighan as *const (), 512)
-            .expect("Failed to disassemble popcount_kernighan");
-    let reference_profile =
-        disassemble_function_pointer("popcount_reference", popcount_reference as *const (), 512)
-            .expect("Failed to disassemble popcount_reference");
-
-    let static_report = StaticAssemblyReport::new(naive_profile, kernighan_profile, reference_profile);
-    println!("{}", static_report.render_markdown_table());
-
-    // 5. Interpretation Archive
-    println!("--- [Phase 5: Interpretation Archive (Knowledge Base)] ---\n");
-    let archive = InterpretationArchive::populate_cae1b_findings();
-    println!("{}", archive.render_markdown_table());
+    println!("--- [Phase 6: Interpretation Archive (Knowledge Base)] ---\n");
+    let interp_archive = InterpretationArchive::populate_cae1b_findings();
+    println!("{}", interp_archive.render_markdown_table());
 
     println!("================================================================================");
-    println!("CAE-1B Milestone Complete. Ready for review before authorizing CAE-1C.");
+    println!("CAE-1C Milestone Complete. Ready for review before authorizing the next phase.");
     println!("================================================================================");
 }
