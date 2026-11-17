@@ -2095,4 +2095,218 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+
+    // --- CAE-1E Phase 4: Controlled Blind Experiment Protocol Tests ---
+
+    #[test]
+    fn test_permitted_view_withholds_all_runtime_execution_evidence() {
+        let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+        assert_eq!(blind_exps.len(), 3, "Must have exactly 3 standard blind experiments");
+
+        let auditor = LeakAuditingMockPredictor {
+            model_id: "Evidence-Leak-Auditor".to_string(),
+        };
+
+        for exp in &blind_exps {
+            assert_eq!(exp.classification, ExperimentClassification::Blind);
+            let view = exp.to_permitted_view();
+
+            // Verify view retains only permitted metadata and disassembly text
+            assert_eq!(view.experiment_id, exp.experiment_id);
+            assert_eq!(view.target_kernel_name, exp.target_kernel_name);
+            assert_eq!(view.compiler_profile, exp.compiler_profile);
+            assert!(!view.disassembly_input.is_empty());
+
+            // Run leak auditor predictor to assert no execution trace metrics were leaked
+            let (resp, pred) = auditor.predict(&view);
+            assert!(resp.contains("Audit passed"));
+            assert_eq!(pred.confidence_percent, Some(100));
+        }
+    }
+
+    #[test]
+    fn test_controlled_blind_experiment_harness_happy_path() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_blind_harness_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+        let exp1 = &blind_exps[0]; // CAE-1E-BLD-001: Release Naive (unrolled)
+
+        let predictor = HeuristicDisassemblyMockPredictor {
+            model_id: "Heuristic-Disassembly-Mock".to_string(),
+        };
+
+        let withheld_evidence = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Release".to_string(),
+            test_inputs_evaluated: vec![0, 1, 7, 0x5555_5555_5555_5555, u64::MAX],
+            observed_instruction_counts: vec![
+                (0, 196),
+                (1, 196),
+                (7, 196),
+                (0x5555_5555_5555_5555, 196),
+                (u64::MAX, 196),
+            ],
+            loop_header_backedges_observed: Some(0),
+            total_backward_branches_observed: Some(0),
+            key_register_states_observed: vec!["EAX=result".to_string()],
+            trace_artifact_reference: "trace_release_naive_blind.txt".to_string(),
+        };
+
+        let exec = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store,
+            exp1,
+            &predictor,
+            &withheld_evidence,
+            "PRED-BLD-001",
+            "EV-BLD-001",
+            "2026-11-17T12:00:00Z",
+            "2026-11-17T12:15:00Z",
+        ).expect("Controlled blind experiment execution must succeed");
+
+        assert_eq!(exec.experiment_id, "CAE-1E-BLD-001");
+        assert_eq!(exec.prediction_id, "PRED-BLD-001");
+        assert_eq!(exec.evidence_id, "EV-BLD-001");
+        assert!(exec.pre_disclosure_verification_passed, "Pre-disclosure digest verification must pass");
+        assert_eq!(exec.final_prediction_state, PredictionState::Archived);
+        assert!(exec.post_archival_integrity_verified, "Post-archival digest must match frozen hash bit-for-bit");
+        assert_eq!(exec.evaluation_report.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+        assert_eq!(exec.evaluation_report.backedge_status, BackedgeEvaluationStatus::ExactMatch);
+
+        // Verify summary rendering
+        let summary = exec.render_summary();
+        assert!(summary.contains("Controlled Blind Experiment: CAE-1E-BLD-001"));
+        assert!(summary.contains("VerifiedPrediction"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_controlled_blind_experiment_with_abstaining_predictor() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_blind_abstain_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+        let exp2 = &blind_exps[1]; // CAE-1E-BLD-002: Release Kernighan
+
+        let predictor = AbstainingMockPredictor {
+            model_id: "Principled-Abstainer-Mock".to_string(),
+            abstention_reason: "Withheld runtime helper costs cannot be inferred from disassembly alone.".to_string(),
+        };
+
+        let withheld_evidence = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Release".to_string(),
+            test_inputs_evaluated: vec![0, 1, 7],
+            observed_instruction_counts: vec![(0, 4), (1, 10), (7, 20)],
+            loop_header_backedges_observed: Some(2),
+            total_backward_branches_observed: Some(2),
+            key_register_states_observed: vec!["EAX=result".to_string()],
+            trace_artifact_reference: "trace_release_kernighan_blind.txt".to_string(),
+        };
+
+        let exec = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store,
+            exp2,
+            &predictor,
+            &withheld_evidence,
+            "PRED-BLD-002",
+            "EV-BLD-002",
+            "2026-11-17T12:00:00Z",
+            "2026-11-17T12:15:00Z",
+        ).expect("Controlled experiment with abstaining predictor must succeed");
+
+        assert_eq!(exec.final_prediction_state, PredictionState::Archived);
+        assert!(exec.post_archival_integrity_verified);
+        assert_eq!(exec.evaluation_report.scientific_verdict, ScientificVerdict::UnsupportedEvaluation);
+        assert!(exec.evaluation_report.evaluation_points.iter().all(|p| matches!(p.status, InputEvaluationStatus::Abstention { .. })));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_controlled_blind_experiment_with_flawed_predictor() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_blind_flawed_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+        let exp1 = &blind_exps[0]; // CAE-1E-BLD-001: Release Naive (unrolled)
+
+        let predictor = FlawedSourceLevelMockPredictor {
+            model_id: "Flawed-Source-Mock".to_string(),
+        };
+
+        let withheld_evidence = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Release".to_string(),
+            test_inputs_evaluated: vec![0, 1, 7],
+            observed_instruction_counts: vec![(0, 196), (1, 196), (7, 196)],
+            loop_header_backedges_observed: Some(0),
+            total_backward_branches_observed: Some(0),
+            key_register_states_observed: vec!["EAX=result".to_string()],
+            trace_artifact_reference: "trace_release_naive_blind.txt".to_string(),
+        };
+
+        let exec = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store,
+            exp1,
+            &predictor,
+            &withheld_evidence,
+            "PRED-BLD-003",
+            "EV-BLD-003",
+            "2026-11-17T12:00:00Z",
+            "2026-11-17T12:15:00Z",
+        ).expect("Controlled experiment with flawed predictor must succeed");
+
+        assert_eq!(exec.final_prediction_state, PredictionState::Archived);
+        assert!(exec.post_archival_integrity_verified);
+        assert_eq!(exec.evaluation_report.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert!(matches!(exec.evaluation_report.backedge_status, BackedgeEvaluationStatus::Discrepancy { .. }));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_controlled_blind_experiment_rejects_profile_mismatch_and_premature_evidence() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_blind_reject_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+        let exp1 = &blind_exps[0]; // Profile: Release
+
+        let predictor = HeuristicDisassemblyMockPredictor {
+            model_id: "Heuristic-Mock".to_string(),
+        };
+
+        // Evidence with mismatched compiler profile: "Debug" instead of "Release"
+        let bad_profile_evidence = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Debug".to_string(),
+            test_inputs_evaluated: vec![0],
+            observed_instruction_counts: vec![(0, 196)],
+            loop_header_backedges_observed: Some(0),
+            total_backward_branches_observed: Some(0),
+            key_register_states_observed: vec![],
+            trace_artifact_reference: "trace_debug.txt".to_string(),
+        };
+
+        let res = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store,
+            exp1,
+            &predictor,
+            &bad_profile_evidence,
+            "PRED-BLD-ERR",
+            "EV-BLD-ERR",
+            "2026-11-17T12:00:00Z",
+            "2026-11-17T12:15:00Z",
+        );
+        assert!(matches!(res, Err(StorageError::Protocol(PredictionProtocolError::CorruptedRecord { .. }))), "Mismatched compiler profile must be rejected");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 }

@@ -324,23 +324,39 @@ impl ExperimentDefinition {
     pub fn to_durable_text(&self) -> String {
         let mut s = String::with_capacity(1024);
         s.push_str("[EXPERIMENT_DEFINITION_V1]\n");
-        s.push_str(&format!("experiment_id={}\n", escape_text(&self.experiment_id)));
-        s.push_str(&format!("target_kernel_name={}\n", escape_text(&self.target_kernel_name)));
-        s.push_str(&format!("compiler_profile={}\n", escape_text(&self.compiler_profile)));
-        s.push_str(&format!("classification={}\n", self.classification));
-        s.push_str(&format!("target_executable_name={}\n", escape_text(&self.target_executable_name)));
-        s.push_str(&format!("target_executable_sha256={}\n", self.target_executable_sha256.as_deref().unwrap_or("__NONE__")));
-        s.push_str(&format!("disassembly_input={}\n", escape_text(&self.disassembly_input)));
+        s.push_str(&format!("experiment_id={}
+", escape_text(&self.experiment_id)));
+        s.push_str(&format!("target_kernel_name={}
+", escape_text(&self.target_kernel_name)));
+        s.push_str(&format!("compiler_profile={}
+", escape_text(&self.compiler_profile)));
+        s.push_str(&format!("classification={}
+", self.classification));
+        s.push_str(&format!("target_executable_name={}
+", escape_text(&self.target_executable_name)));
+        s.push_str(&format!("target_executable_sha256={}
+", self.target_executable_sha256.as_deref().unwrap_or("__NONE__")));
+        s.push_str(&format!("disassembly_input={}
+", escape_text(&self.disassembly_input)));
         let permitted_escaped: Vec<String> = self.permitted_information.iter().map(|p| escape_text(p)).collect();
-        s.push_str(&format!("permitted_information={}\n", permitted_escaped.join(";;")));
-        s.push_str(&format!("entry_delimiter={}\n", escape_text(&self.measurement_boundaries.entry_delimiter)));
-        s.push_str(&format!("exit_delimiter={}\n", escape_text(&self.measurement_boundaries.exit_delimiter)));
-        s.push_str(&format!("call_ret_accounting={}\n", escape_text(&self.measurement_boundaries.call_ret_accounting)));
-        s.push_str(&format!("expected_response_schema={}\n", escape_text(&self.expected_response_schema)));
-        s.push_str(&format!("exact_instruction_match_required={}\n", self.scoring_rules.exact_instruction_match_required));
-        s.push_str(&format!("branch_breakdown_scored={}\n", self.scoring_rules.branch_breakdown_scored));
-        s.push_str(&format!("allow_unresolved_investigation={}\n", self.scoring_rules.allow_unresolved_investigation));
-        s.push_str(&format!("scoring_criteria_description={}\n", escape_text(&self.scoring_rules.scoring_criteria_description)));
+        s.push_str(&format!("permitted_information={}
+", permitted_escaped.join(";;")));
+        s.push_str(&format!("entry_delimiter={}
+", escape_text(&self.measurement_boundaries.entry_delimiter)));
+        s.push_str(&format!("exit_delimiter={}
+", escape_text(&self.measurement_boundaries.exit_delimiter)));
+        s.push_str(&format!("call_ret_accounting={}
+", escape_text(&self.measurement_boundaries.call_ret_accounting)));
+        s.push_str(&format!("expected_response_schema={}
+", escape_text(&self.expected_response_schema)));
+        s.push_str(&format!("exact_instruction_match_required={}
+", self.scoring_rules.exact_instruction_match_required));
+        s.push_str(&format!("branch_breakdown_scored={}
+", self.scoring_rules.branch_breakdown_scored));
+        s.push_str(&format!("allow_unresolved_investigation={}
+", self.scoring_rules.allow_unresolved_investigation));
+        s.push_str(&format!("scoring_criteria_description={}
+", escape_text(&self.scoring_rules.scoring_criteria_description)));
         s.push_str("[END_EXPERIMENT_DEFINITION]\n");
         s
     }
@@ -835,45 +851,66 @@ impl PredictionRecord {
     pub fn to_durable_text(&self) -> String {
         let mut s = String::with_capacity(2048);
         s.push_str("[PREDICTION_RECORD_V1]\n");
-        s.push_str(&format!("prediction_id={}\n", escape_text(&self.prediction_id)));
-        s.push_str(&format!("experiment_id={}\n", escape_text(&self.experiment_id)));
-        s.push_str(&format!("model_identifier={}\n", escape_text(&self.model_identifier)));
-        s.push_str(&format!("model_configuration={}\n", self.model_configuration.as_deref().map(escape_text).unwrap_or_else(|| "__NONE__".to_string())));
-        s.push_str(&format!("registration_timestamp_iso8601={}\n", escape_text(&self.registration_timestamp_iso8601)));
-        s.push_str(&format!("state={}\n", self.state));
-        s.push_str(&format!("canonical_sha256={}\n", self.canonical_sha256));
-        s.push_str(&format!("original_response_text={}\n", escape_text(&self.original_response_text)));
-        s.push_str(&format!("notes_and_rationale={}\n", escape_text(&self.structured_prediction.notes_and_rationale)));
-        s.push_str(&format!("confidence_percent={}\n", self.structured_prediction.confidence_percent.map(|c| c.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
+        s.push_str(&format!("prediction_id={}
+", escape_text(&self.prediction_id)));
+        s.push_str(&format!("experiment_id={}
+", escape_text(&self.experiment_id)));
+        s.push_str(&format!("model_identifier={}
+", escape_text(&self.model_identifier)));
+        s.push_str(&format!("model_configuration={}
+", self.model_configuration.as_deref().map(escape_text).unwrap_or_else(|| "__NONE__".to_string())));
+        s.push_str(&format!("registration_timestamp_iso8601={}
+", escape_text(&self.registration_timestamp_iso8601)));
+        s.push_str(&format!("state={}
+", self.state));
+        s.push_str(&format!("canonical_sha256={}
+", self.canonical_sha256));
+        s.push_str(&format!("original_response_text={}
+", escape_text(&self.original_response_text)));
+        s.push_str(&format!("notes_and_rationale={}
+", escape_text(&self.structured_prediction.notes_and_rationale)));
+        s.push_str(&format!("confidence_percent={}
+", self.structured_prediction.confidence_percent.map(|c| c.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
 
         match &self.structured_prediction.instruction_count {
-            InstructionCountHypothesis::Constant(c) => s.push_str(&format!("instruction_count=Constant:{}\n", c)),
-            InstructionCountHypothesis::Linear { intercept, slope } => s.push_str(&format!("instruction_count=Linear:{}:{}\n", intercept, slope)),
+            InstructionCountHypothesis::Constant(c) => s.push_str(&format!("instruction_count=Constant:{}
+", c)),
+            InstructionCountHypothesis::Linear { intercept, slope } => s.push_str(&format!("instruction_count=Linear:{}:{}
+", intercept, slope)),
             InstructionCountHypothesis::PiecewisePopcount { zero_case, non_zero_intercept, non_zero_slope } => {
-                s.push_str(&format!("instruction_count=PiecewisePopcount:{}:{}:{}\n", zero_case, non_zero_intercept, non_zero_slope))
+                s.push_str(&format!("instruction_count=PiecewisePopcount:{}:{}:{}
+", zero_case, non_zero_intercept, non_zero_slope))
             }
             InstructionCountHypothesis::PiecewiseGeneral { rules } => {
                 let encoded: Vec<String> = rules.iter().map(|(c, f)| format!("{}::{}", escape_text(c), escape_text(f))).collect();
-                s.push_str(&format!("instruction_count=PiecewiseGeneral:{}\n", encoded.join(";;")));
+                s.push_str(&format!("instruction_count=PiecewiseGeneral:{}
+", encoded.join(";;")));
             }
-            InstructionCountHypothesis::Unknown { reason } => s.push_str(&format!("instruction_count=Unknown:{}\n", escape_text(reason))),
-            InstructionCountHypothesis::Abstention { reason } => s.push_str(&format!("instruction_count=Abstention:{}\n", escape_text(reason))),
+            InstructionCountHypothesis::Unknown { reason } => s.push_str(&format!("instruction_count=Unknown:{}
+", escape_text(reason))),
+            InstructionCountHypothesis::Abstention { reason } => s.push_str(&format!("instruction_count=Abstention:{}
+", escape_text(reason))),
         }
 
         match &self.structured_prediction.loop_branch {
-            LoopBranchHypothesis::Unrolled { explanation } => s.push_str(&format!("loop_branch=Unrolled:{}\n", escape_text(explanation))),
+            LoopBranchHypothesis::Unrolled { explanation } => s.push_str(&format!("loop_branch=Unrolled:{}
+", escape_text(explanation))),
             LoopBranchHypothesis::LoopWithBackedges { loop_header_backedges, backward_join_branches } => {
-                s.push_str(&format!("loop_branch=LoopWithBackedges:{}::{}\n", escape_text(loop_header_backedges), backward_join_branches.as_deref().map(escape_text).unwrap_or_else(|| "__NONE__".to_string())))
+                s.push_str(&format!("loop_branch=LoopWithBackedges:{}::{}
+", escape_text(loop_header_backedges), backward_join_branches.as_deref().map(escape_text).unwrap_or_else(|| "__NONE__".to_string())))
             }
             LoopBranchHypothesis::StraightLine => s.push_str("loop_branch=StraightLine\n"),
-            LoopBranchHypothesis::Unknown { reason } => s.push_str(&format!("loop_branch=Unknown:{}\n", escape_text(reason))),
-            LoopBranchHypothesis::Abstention { reason } => s.push_str(&format!("loop_branch=Abstention:{}\n", escape_text(reason))),
+            LoopBranchHypothesis::Unknown { reason } => s.push_str(&format!("loop_branch=Unknown:{}
+", escape_text(reason))),
+            LoopBranchHypothesis::Abstention { reason } => s.push_str(&format!("loop_branch=Abstention:{}
+", escape_text(reason))),
         }
 
         let roles: Vec<String> = self.structured_prediction.register_roles.iter()
             .map(|r| format!("{}::{}", escape_text(&r.register_name), escape_text(&r.hypothesized_role)))
             .collect();
-        s.push_str(&format!("register_roles={}\n", roles.join(";;")));
+        s.push_str(&format!("register_roles={}
+", roles.join(";;")));
         s.push_str("[END_PREDICTION_RECORD]\n");
         s
     }
@@ -1105,29 +1142,46 @@ impl EvidenceRecord {
     pub fn to_durable_text(&self) -> String {
         let mut s = String::with_capacity(1024);
         s.push_str("[EVIDENCE_RECORD_V1]\n");
-        s.push_str(&format!("evidence_id={}\n", escape_text(&self.evidence_id)));
-        s.push_str(&format!("experiment_id={}\n", escape_text(&self.experiment_id)));
-        s.push_str(&format!("prediction_id={}\n", escape_text(&self.prediction_id)));
-        s.push_str(&format!("collection_timestamp_iso8601={}\n", escape_text(&self.collection_timestamp_iso8601)));
-        s.push_str(&format!("evidence_disclosed_prior_to_prediction={}\n", self.evidence_disclosed_prior_to_prediction));
-        s.push_str(&format!("scientific_verdict={}\n", self.scientific_verdict));
-        s.push_str(&format!("verdict_explanation={}\n", escape_text(&self.verdict_explanation)));
-        s.push_str(&format!("discrepancy_summary={}\n", escape_text(&self.discrepancy_summary)));
+        s.push_str(&format!("evidence_id={}
+", escape_text(&self.evidence_id)));
+        s.push_str(&format!("experiment_id={}
+", escape_text(&self.experiment_id)));
+        s.push_str(&format!("prediction_id={}
+", escape_text(&self.prediction_id)));
+        s.push_str(&format!("collection_timestamp_iso8601={}
+", escape_text(&self.collection_timestamp_iso8601)));
+        s.push_str(&format!("evidence_disclosed_prior_to_prediction={}
+", self.evidence_disclosed_prior_to_prediction));
+        s.push_str(&format!("scientific_verdict={}
+", self.scientific_verdict));
+        s.push_str(&format!("verdict_explanation={}
+", escape_text(&self.verdict_explanation)));
+        s.push_str(&format!("discrepancy_summary={}
+", escape_text(&self.discrepancy_summary)));
 
         if let Some(trace) = &self.native_trace {
             s.push_str("has_native_trace=true\n");
-            s.push_str(&format!("trace_target_executable_name={}\n", escape_text(&trace.target_executable_name)));
-            s.push_str(&format!("trace_target_executable_sha256={}\n", trace.target_executable_sha256.as_deref().unwrap_or("__NONE__")));
-            s.push_str(&format!("trace_compiler_profile={}\n", escape_text(&trace.compiler_profile)));
+            s.push_str(&format!("trace_target_executable_name={}
+", escape_text(&trace.target_executable_name)));
+            s.push_str(&format!("trace_target_executable_sha256={}
+", trace.target_executable_sha256.as_deref().unwrap_or("__NONE__")));
+            s.push_str(&format!("trace_compiler_profile={}
+", escape_text(&trace.compiler_profile)));
             let inputs_str: Vec<String> = trace.test_inputs_evaluated.iter().map(|i| i.to_string()).collect();
-            s.push_str(&format!("trace_test_inputs={}\n", inputs_str.join(",")));
+            s.push_str(&format!("trace_test_inputs={}
+", inputs_str.join(",")));
             let counts_str: Vec<String> = trace.observed_instruction_counts.iter().map(|(i, c)| format!("{}:{}", i, c)).collect();
-            s.push_str(&format!("trace_observed_counts={}\n", counts_str.join(",")));
-            s.push_str(&format!("trace_loop_header_backedges={}\n", trace.loop_header_backedges_observed.map(|b| b.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
-            s.push_str(&format!("trace_total_backward_branches={}\n", trace.total_backward_branches_observed.map(|b| b.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
+            s.push_str(&format!("trace_observed_counts={}
+", counts_str.join(",")));
+            s.push_str(&format!("trace_loop_header_backedges={}
+", trace.loop_header_backedges_observed.map(|b| b.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
+            s.push_str(&format!("trace_total_backward_branches={}
+", trace.total_backward_branches_observed.map(|b| b.to_string()).unwrap_or_else(|| "__NONE__".to_string())));
             let reg_escaped: Vec<String> = trace.key_register_states_observed.iter().map(|r| escape_text(r)).collect();
-            s.push_str(&format!("trace_key_registers={}\n", reg_escaped.join(";;")));
-            s.push_str(&format!("trace_artifact_reference={}\n", escape_text(&trace.trace_artifact_reference)));
+            s.push_str(&format!("trace_key_registers={}
+", reg_escaped.join(";;")));
+            s.push_str(&format!("trace_artifact_reference={}
+", escape_text(&trace.trace_artifact_reference)));
         } else {
             s.push_str("has_native_trace=false\n");
         }
@@ -1845,8 +1899,10 @@ impl PredictionEvaluationReport {
         out.push_str(&format!("- **Model:** `{}`\n", self.model_identifier));
         out.push_str(&format!("- **Scientific Verdict:** `{}`\n", self.scientific_verdict));
         out.push_str(&format!("- **Prior Disclosure:** `{}`\n", self.evidence_disclosed_prior_to_prediction));
-        out.push_str(&format!("- **Discrepancy Summary:** {}\n", self.discrepancy_summary));
-        out.push_str(&format!("- **Verdict Explanation:** {}\n\n", self.verdict_explanation));
+        out.push_str(&format!("- **Discrepancy Summary:** {}
+", self.discrepancy_summary));
+        out.push_str(&format!("- **Verdict Explanation:** {}
+\n", self.verdict_explanation));
 
         out.push_str("| Input (Hex / Dec) | Popcount (k) | Predicted | Observed | Discrepancy (Obs - Pred) | Point Verdict |\n");
         out.push_str("| :--- | :---: | :---: | :---: | :---: | :--- |\n");
@@ -2545,5 +2601,434 @@ impl PredictionRecord {
                 (pred, ScientificVerdict::UnsupportedEvaluation)
             },
         ]
+    }
+}
+
+
+// ============================================================================
+// CAE-1E Phase 4: Controlled Blind Experiment Protocol & Mock Predictors
+// ============================================================================
+
+/// Sanitized experiment prompt view presented to a predictor, strictly withholding all runtime execution evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermittedExperimentView {
+    pub experiment_id: String,
+    pub target_kernel_name: String,
+    pub compiler_profile: String,
+    pub classification: ExperimentClassification,
+    pub disassembly_input: String,
+    pub permitted_information: Vec<String>,
+    pub measurement_boundaries: MeasurementBoundaries,
+    pub expected_response_schema: String,
+}
+
+impl ExperimentDefinition {
+    /// Extract the sanitized view containing ONLY permitted information, strictly withholding execution evidence.
+    pub fn to_permitted_view(&self) -> PermittedExperimentView {
+        PermittedExperimentView {
+            experiment_id: self.experiment_id.clone(),
+            target_kernel_name: self.target_kernel_name.clone(),
+            compiler_profile: self.compiler_profile.clone(),
+            classification: self.classification,
+            disassembly_input: self.disassembly_input.clone(),
+            permitted_information: self.permitted_information.clone(),
+            measurement_boundaries: self.measurement_boundaries.clone(),
+            expected_response_schema: self.expected_response_schema.clone(),
+        }
+    }
+
+    /// Populate standard blind experiments for controlled protocol validation.
+    pub fn populate_standard_blind_experiments() -> Vec<Self> {
+        let boundaries = MeasurementBoundaries {
+            entry_delimiter: "int 3 immediately preceding function dispatch call rax".to_string(),
+            exit_delimiter: "int 3 immediately following ret".to_string(),
+            call_ret_accounting: "Function internal steps between call rax and ret, excluding dispatch harness".to_string(),
+        };
+
+        let scoring = ScoringRules {
+            exact_instruction_match_required: false,
+            branch_breakdown_scored: true,
+            allow_unresolved_investigation: true,
+            scoring_criteria_description: "Matches closed-form instruction count formula and loop backedge topology".to_string(),
+        };
+
+        vec![
+            Self {
+                experiment_id: "CAE-1E-BLD-001".to_string(),
+                target_kernel_name: "popcount_naive".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "196 static instructions; fully unrolled straight-line BT/ADC sequences; zero branches.".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc".to_string(),
+                    "Profile: Release (opt-level 3)".to_string(),
+                    "Signature: fn(u64) -> u32".to_string(),
+                ],
+                measurement_boundaries: boundaries.clone(),
+                expected_response_schema: "Instruction count scaling model, loop backedge count, accumulator registers".to_string(),
+                scoring_rules: scoring.clone(),
+            },
+            Self {
+                experiment_id: "CAE-1E-BLD-002".to_string(),
+                target_kernel_name: "popcount_kernighan".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "10 static instructions; bottom-tested loop; registers RCX/EAX/RDX; no stack spill.".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc".to_string(),
+                    "Profile: Release (opt-level 3)".to_string(),
+                    "Signature: fn(u64) -> u32".to_string(),
+                ],
+                measurement_boundaries: boundaries.clone(),
+                expected_response_schema: "Instruction count scaling model, loop backedge count, accumulator registers".to_string(),
+                scoring_rules: scoring.clone(),
+            },
+            Self {
+                experiment_id: "CAE-1E-BLD-003".to_string(),
+                target_kernel_name: "popcount_reference".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "20 static instructions; software parallel bitwise reduction tree in registers.".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc (baseline target CPU, popcnt feature disabled)".to_string(),
+                    "Profile: Release (opt-level 3)".to_string(),
+                    "Signature: fn(u64) -> u32".to_string(),
+                ],
+                measurement_boundaries: boundaries,
+                expected_response_schema: "Instruction count scaling model, loop backedge count, accumulator registers".to_string(),
+                scoring_rules: scoring,
+            },
+        ]
+    }
+}
+
+/// Interface for predictors in controlled scientific experiments.
+///
+/// In Phase 4, mock implementations are used to rigorously test information withholding,
+/// registration ordering, and state transitions without evaluating a real autonomous LLM.
+pub trait ControlledPredictor {
+    fn model_identifier(&self) -> &str;
+    fn predict(&self, view: &PermittedExperimentView) -> (String, StructuredPrediction);
+}
+
+/// Heuristic mock predictor that analyzes the disassembly string in the permitted view.
+#[derive(Debug, Clone)]
+pub struct HeuristicDisassemblyMockPredictor {
+    pub model_id: String,
+}
+
+impl ControlledPredictor for HeuristicDisassemblyMockPredictor {
+    fn model_identifier(&self) -> &str {
+        &self.model_id
+    }
+
+    fn predict(&self, view: &PermittedExperimentView) -> (String, StructuredPrediction) {
+        let dis = &view.disassembly_input;
+        let profile = &view.compiler_profile;
+
+        // Static heuristics based solely on disassembly text
+        if dis.contains("straight-line") || dis.contains("unrolled") {
+            let count = if dis.contains("196") { 196 } else if dis.contains("20") { 20 } else { 24 };
+            (
+                format!("Analyzed static disassembly: straight-line sequence detected with {} instructions.", count),
+                StructuredPrediction {
+                    instruction_count: InstructionCountHypothesis::Constant(count),
+                    loop_branch: LoopBranchHypothesis::StraightLine,
+                    register_roles: vec![],
+                    confidence_percent: Some(90),
+                    notes_and_rationale: "Heuristic detector identified straight-line instructions without loop backedges.".to_string(),
+                },
+            )
+        } else if dis.contains("top-tested") || dis.contains("33 static") {
+            (
+                "Analyzed static disassembly: top-tested loop with stack frame spills detected.".to_string(),
+                StructuredPrediction {
+                    instruction_count: InstructionCountHypothesis::Linear { intercept: 8, slope: 21 },
+                    loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                        loop_header_backedges: "k".to_string(),
+                        backward_join_branches: Some("none".to_string()),
+                    },
+                    register_roles: vec![],
+                    confidence_percent: Some(85),
+                    notes_and_rationale: "Heuristic detector identified top-tested loop with stack frame spills.".to_string(),
+                },
+            )
+        } else if profile == "Release" && dis.contains("bottom-tested") {
+            (
+                "Analyzed static disassembly: bottom-tested loop in release mode.".to_string(),
+                StructuredPrediction {
+                    instruction_count: InstructionCountHypothesis::PiecewisePopcount {
+                        zero_case: 4,
+                        non_zero_intercept: 5,
+                        non_zero_slope: 5,
+                    },
+                    loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                        loop_header_backedges: "k-1".to_string(),
+                        backward_join_branches: None,
+                    },
+                    register_roles: vec![],
+                    confidence_percent: Some(88),
+                    notes_and_rationale: "Heuristic detector identified bottom-tested loop with zero-case bypass.".to_string(),
+                },
+            )
+        } else {
+            (
+                "Analyzed static disassembly: generic loop detected.".to_string(),
+                StructuredPrediction {
+                    instruction_count: InstructionCountHypothesis::Linear { intercept: 4652, slope: 8 },
+                    loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                        loop_header_backedges: "64".to_string(),
+                        backward_join_branches: Some("k".to_string()),
+                    },
+                    register_roles: vec![],
+                    confidence_percent: Some(80),
+                    notes_and_rationale: "Heuristic detector identified 64-step iterator loop.".to_string(),
+                },
+            )
+        }
+    }
+}
+
+/// Flawed mock predictor that always assumes naive source-level loops are preserved at runtime.
+#[derive(Debug, Clone)]
+pub struct FlawedSourceLevelMockPredictor {
+    pub model_id: String,
+}
+
+impl ControlledPredictor for FlawedSourceLevelMockPredictor {
+    fn model_identifier(&self) -> &str {
+        &self.model_id
+    }
+
+    fn predict(&self, _view: &PermittedExperimentView) -> (String, StructuredPrediction) {
+        (
+            "Predicts naive loop structure is executed verbatim.".to_string(),
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Linear { intercept: 585, slope: 3 },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "64 iterations".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![],
+                confidence_percent: Some(99),
+                notes_and_rationale: "Flawed predictor assuming compiler preserves naive loop structure.".to_string(),
+            },
+        )
+    }
+}
+
+/// Principled mock predictor that explicitly abstains when information is withheld or uncertain.
+#[derive(Debug, Clone)]
+pub struct AbstainingMockPredictor {
+    pub model_id: String,
+    pub abstention_reason: String,
+}
+
+impl ControlledPredictor for AbstainingMockPredictor {
+    fn model_identifier(&self) -> &str {
+        &self.model_id
+    }
+
+    fn predict(&self, _view: &PermittedExperimentView) -> (String, StructuredPrediction) {
+        (
+            format!("Abstaining: {}", self.abstention_reason),
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Abstention {
+                    reason: self.abstention_reason.clone(),
+                },
+                loop_branch: LoopBranchHypothesis::Abstention {
+                    reason: self.abstention_reason.clone(),
+                },
+                register_roles: vec![],
+                confidence_percent: None,
+                notes_and_rationale: "Controlled principled abstention test.".to_string(),
+            },
+        )
+    }
+}
+
+/// Leak-auditing mock predictor that inspects the permitted view to prove that no execution traces were leaked.
+#[derive(Debug, Clone)]
+pub struct LeakAuditingMockPredictor {
+    pub model_id: String,
+}
+
+impl ControlledPredictor for LeakAuditingMockPredictor {
+    fn model_identifier(&self) -> &str {
+        &self.model_id
+    }
+
+    fn predict(&self, view: &PermittedExperimentView) -> (String, StructuredPrediction) {
+        // Audit that no execution metrics are leaked into the permitted prompt
+        let prompt_text = format!(
+            "{} {} {} {:?}",
+            view.experiment_id, view.target_kernel_name, view.disassembly_input, view.permitted_information
+        );
+
+        let leak_tokens = [
+            "observed_instruction_counts",
+            "loop_header_backedges_observed",
+            "total_backward_branches_observed",
+            "trace_target_executable_name",
+            "step_count_kernighan",
+        ];
+
+        for token in &leak_tokens {
+            assert!(
+                !prompt_text.contains(token),
+                "Protocol security violation: execution metric '{}' leaked into permitted view!",
+                token
+            );
+        }
+
+        (
+            "Audit passed: Permitted view verified free of leaked execution metrics.".to_string(),
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Constant(196),
+                loop_branch: LoopBranchHypothesis::StraightLine,
+                register_roles: vec![],
+                confidence_percent: Some(100),
+                notes_and_rationale: "Audit predictor confirming complete information withholding.".to_string(),
+            },
+        )
+    }
+}
+
+/// Execution summary of a controlled blind experiment across the 4 protocol stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlledExperimentExecution {
+    pub experiment_id: String,
+    pub prediction_id: String,
+    pub evidence_id: String,
+    pub frozen_canonical_sha256: String,
+    pub pre_disclosure_verification_passed: bool,
+    pub evaluation_report: PredictionEvaluationReport,
+    pub final_prediction_state: PredictionState,
+    pub post_archival_integrity_verified: bool,
+}
+
+impl ControlledExperimentExecution {
+    pub fn render_summary(&self) -> String {
+        format!(
+            "=== Controlled Blind Experiment: {} ===\n             - Prediction ID: `{}`\n             - Canonical SHA-256 (Frozen): `{}`\n             - Pre-Disclosure Integrity Verified: `{}`\n             - Scientific Verdict: `{}`\n             - Final Lifecycle State: `{}`\n             - Post-Archival Integrity Verified: `{}`\n             - Summary: {}
+",
+            self.experiment_id,
+            self.prediction_id,
+            self.frozen_canonical_sha256,
+            self.pre_disclosure_verification_passed,
+            self.evaluation_report.scientific_verdict,
+            self.final_prediction_state,
+            self.post_archival_integrity_verified,
+            self.evaluation_report.discrepancy_summary
+        )
+    }
+}
+
+/// Controlled Blind Experiment Harness enforcing strict 4-stage ordering and information withholding.
+pub struct ControlledBlindExperimentHarness;
+
+impl ControlledBlindExperimentHarness {
+    /// Execute the complete 4-stage controlled blind experiment protocol:
+    ///
+    /// 1. Prepare unseen experiment (strictly sanitize into `PermittedExperimentView`).
+    /// 2. Register prediction (query predictor, freeze canonical SHA-256 digest, persist to store in Frozen state BEFORE evidence disclosure).
+    /// 3. Reveal execution evidence (load withheld native trace and validate provenance).
+    /// 4. Score and archive (evaluate via `DeterministicPredictionEvaluator`, advance lifecycle `Frozen -> Verified -> Archived`, persist evidence).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_controlled_experiment(
+        store: &DurablePredictionStore,
+        experiment: &ExperimentDefinition,
+        predictor: &dyn ControlledPredictor,
+        withheld_evidence: &NativeTraceEvidence,
+        prediction_id: &str,
+        evidence_id: &str,
+        registration_timestamp: &str,
+        evaluation_timestamp: &str,
+    ) -> Result<ControlledExperimentExecution, StorageError> {
+        // Stage 1: Prepare unseen experiment
+        // Persist experiment definition to store if not already present
+        if store.load_experiment(&experiment.experiment_id).is_err() {
+            store.save_experiment(experiment)?;
+        }
+
+        // Sanitize experiment to permitted view only (strictly withholding trace data)
+        let permitted_view = experiment.to_permitted_view();
+
+        // Stage 2: Register prediction
+        // Query predictor using ONLY permitted view
+        let (raw_response, structured) = predictor.predict(&permitted_view);
+
+        let mut record = PredictionRecord::new_draft(
+            prediction_id,
+            &experiment.experiment_id,
+            predictor.model_identifier(),
+            raw_response,
+            structured,
+            registration_timestamp,
+        );
+
+        // Freeze prediction: permanently locks canonical SHA-256 digest
+        record.freeze().map_err(StorageError::Protocol)?;
+        let frozen_hash = record.canonical_sha256().to_string();
+        let pre_disclosure_verification_passed = record.verify_integrity();
+
+        // Save frozen prediction to store BEFORE evidence disclosure
+        store.save_prediction(&record)?;
+
+        // Audit pre-condition: Evidence must NOT yet exist in store
+        if store.load_evidence(evidence_id).is_ok() {
+            return Err(StorageError::DuplicateEvidenceId(format!(
+                "Protocol violation: evidence '{}' already exists in store prior to disclosure stage!",
+                evidence_id
+            )));
+        }
+
+        // Stage 3: Reveal execution evidence
+        // Validate evidence provenance against experiment contract
+        if withheld_evidence.compiler_profile != experiment.compiler_profile {
+            return Err(StorageError::Protocol(PredictionProtocolError::CorruptedRecord {
+                detail: format!(
+                    "Evidence compiler profile '{}' does not match experiment profile '{}'",
+                    withheld_evidence.compiler_profile, experiment.compiler_profile
+                ),
+            }));
+        }
+
+        // Stage 4: Score and archive
+        // Evaluate prediction deterministically against revealed evidence
+        let report = DeterministicPredictionEvaluator::evaluate(experiment, &record, Some(withheld_evidence), false);
+
+        // Advance lifecycle: Frozen -> Verified
+        record.mark_verified().map_err(StorageError::Protocol)?;
+        store.save_prediction(&record)?;
+
+        // Append evidence record to store
+        let ev_record = report.to_evidence_record(evidence_id, evaluation_timestamp, Some(withheld_evidence.clone()));
+        store.append_evidence(&ev_record)?;
+
+        // Advance lifecycle: Verified -> Archived
+        record.archive().map_err(StorageError::Protocol)?;
+        store.save_prediction(&record)?;
+
+        // Audit post-condition: Reload from disk and verify immutability and final state
+        let reloaded = store.load_prediction(prediction_id)?;
+        let post_archival_integrity_verified = reloaded.verify_integrity() && reloaded.canonical_sha256() == frozen_hash;
+
+        Ok(ControlledExperimentExecution {
+            experiment_id: experiment.experiment_id.clone(),
+            prediction_id: prediction_id.to_string(),
+            evidence_id: evidence_id.to_string(),
+            frozen_canonical_sha256: frozen_hash,
+            pre_disclosure_verification_passed,
+            evaluation_report: report,
+            final_prediction_state: reloaded.state(),
+            post_archival_integrity_verified,
+        })
     }
 }

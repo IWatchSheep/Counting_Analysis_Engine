@@ -1,7 +1,10 @@
 #![allow(non_snake_case)]
 
 use Counting_Analysis_Engine::llm_protocol::{
-    DeterministicPredictionEvaluator, ExperimentDefinition, NativeTraceEvidence, PredictionRecord,
+    AbstainingMockPredictor, ControlledPredictor, ControlledBlindExperimentHarness, DeterministicPredictionEvaluator,
+    DurablePredictionStore, ExperimentDefinition, FlawedSourceLevelMockPredictor,
+    HeuristicDisassemblyMockPredictor, LeakAuditingMockPredictor, NativeTraceEvidence,
+    PredictionRecord,
 };
 
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
@@ -825,7 +828,82 @@ fn main() {
         }
     }
 
+    // 9. CAE-1E Phase 4: Controlled Blind Experiment Protocol & Registration Ordering
+    println!("--- [Phase 9: Controlled Blind Experiment Protocol (CAE-1E Phase 4)] ---\n");
+    println!("Guiding Principle: Prove information withholding and registration order using mock predictors");
+    println!("before exposing execution evidence or evaluating autonomous models.\n");
+
+    let blind_exps = ExperimentDefinition::populate_standard_blind_experiments();
+    println!("Populated {} standard blind experiments with withheld execution evidence:\n", blind_exps.len());
+
+    let temp_store_dir = std::env::temp_dir().join(format!("cae_phase4_demo_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    if let Ok(store) = DurablePredictionStore::new(&temp_store_dir) {
+        // Run Leak Auditor across all blind experiments to prove 0 leakage
+        let auditor = LeakAuditingMockPredictor { model_id: "Evidence-Leak-Auditor".to_string() };
+        for exp in &blind_exps {
+            let view = exp.to_permitted_view();
+            let (audit_msg, _) = auditor.predict(&view);
+            println!("- Experiment `{}`: {}", exp.experiment_id, audit_msg);
+        }
+        println!();
+
+        // 1. Blind Experiment 1 with Heuristic Mock Predictor (Unrolled release naive)
+        let exp1 = &blind_exps[0];
+        let heuristic_pred = HeuristicDisassemblyMockPredictor { model_id: "Heuristic-Disassembly-Mock".to_string() };
+        let ev1 = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Release".to_string(),
+            test_inputs_evaluated: vec![0, 1, 7, 0x5555_5555_5555_5555, u64::MAX],
+            observed_instruction_counts: vec![(0, 196), (1, 196), (7, 196), (0x5555_5555_5555_5555, 196), (u64::MAX, 196)],
+            loop_header_backedges_observed: Some(0),
+            total_backward_branches_observed: Some(0),
+            key_register_states_observed: vec!["EAX=result".to_string()],
+            trace_artifact_reference: "trace_release_naive_blind.txt".to_string(),
+        };
+
+        if let Ok(exec1) = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store, exp1, &heuristic_pred, &ev1, "PRED-DEMO-BLD-001", "EV-DEMO-BLD-001", "2026-11-17T12:00:00Z", "2026-11-17T12:15:00Z"
+        ) {
+            println!("{}", exec1.render_summary());
+        }
+
+        // 2. Blind Experiment 2 with Principled Abstaining Mock Predictor
+        let exp2 = &blind_exps[1];
+        let abstaining_pred = AbstainingMockPredictor {
+            model_id: "Principled-Abstainer-Mock".to_string(),
+            abstention_reason: "Withheld compiler runtime costs cannot be inferred from disassembly alone.".to_string(),
+        };
+        let ev2 = NativeTraceEvidence {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            compiler_profile: "Release".to_string(),
+            test_inputs_evaluated: vec![0, 1, 7],
+            observed_instruction_counts: vec![(0, 4), (1, 10), (7, 20)],
+            loop_header_backedges_observed: Some(2),
+            total_backward_branches_observed: Some(2),
+            key_register_states_observed: vec!["EAX=result".to_string()],
+            trace_artifact_reference: "trace_release_kernighan_blind.txt".to_string(),
+        };
+
+        if let Ok(exec2) = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store, exp2, &abstaining_pred, &ev2, "PRED-DEMO-BLD-002", "EV-DEMO-BLD-002", "2026-11-17T12:00:00Z", "2026-11-17T12:15:00Z"
+        ) {
+            println!("{}", exec2.render_summary());
+        }
+
+        // 3. Blind Experiment 1 with Flawed Mock Predictor (Plausible Semantic Failure)
+        let flawed_pred = FlawedSourceLevelMockPredictor { model_id: "Flawed-Source-Mock".to_string() };
+        if let Ok(exec3) = ControlledBlindExperimentHarness::run_controlled_experiment(
+            &store, exp1, &flawed_pred, &ev1, "PRED-DEMO-BLD-003", "EV-DEMO-BLD-003", "2026-11-17T12:00:00Z", "2026-11-17T12:15:00Z"
+        ) {
+            println!("{}", exec3.render_summary());
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_store_dir);
+    }
+
     println!("================================================================================");
-    println!("CAE-1E Phase 3 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1E Phase 4 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }
