@@ -901,13 +901,21 @@ mod tests {
             assert_eq!(report.count_backward_branches(), expected_backward_branches, "Backward branches mismatch on input 0x{:X}", input);
 
             // Audit true loop header backedges specifically:
-            // In unoptimized debug code, the loop backedge is the unconditional jump at the end of the loop
-            // returning to the Range::next iterator invocation at the loop header.
-            // Address pattern: displacement in operand string contains "65h" (e.g. jmp short 00007FF6...65h)
+            // The loop header backedge is the unconditional jump returning to the Range iterator loop header.
+            // We identify the header target address dynamically from the first loop iteration rather than hardcoding ASLR strings.
+            let header_target = report.steps.iter().enumerate().find_map(|(i, s)| {
+                if i + 1 < report.steps.len() {
+                    let next = &report.steps[i + 1];
+                    if next.address < s.address && s.mnemonic == "jmp" {
+                        return Some(next.address);
+                    }
+                }
+                None
+            });
             let header_backedges = report.steps.iter().enumerate().filter(|(i, s)| {
                 if *i + 1 < report.steps.len() {
                     let next = &report.steps[*i + 1];
-                    (s.mnemonic == "jmp" || s.mnemonic.starts_with('j')) && next.address < s.address && s.operands_str.contains("65h")
+                    s.mnemonic == "jmp" && Some(next.address) == header_target
                 } else {
                     false
                 }
@@ -1330,5 +1338,491 @@ mod tests {
 
         assert_eq!(unresolved.scientific_verdict, ScientificVerdict::UnresolvedDiscrepancy);
         assert!(unresolved.native_trace.is_none(), "Missing evidence must be represented as None without fabrication");
+    }
+
+    // --- CAE-1E Phase 2: Durable Storage & Integrity Verification Tests ---
+
+    #[test]
+    fn test_durable_storage_roundtrip_and_reload() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_test_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        // 1. Experiment definition roundtrip
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        let exp = &exps[2]; // CAE-1E-CAL-003
+        store.save_experiment(exp).expect("Save experiment should succeed");
+        let reloaded_exp = store.load_experiment(&exp.experiment_id).expect("Load experiment should succeed");
+        assert_eq!(*exp, reloaded_exp);
+
+        // 2. Prediction record roundtrip
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 9, slope: 13 },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "k backedges".to_string(),
+                backward_join_branches: Some("none".to_string()),
+            },
+            register_roles: vec![
+                RegisterRoleHypothesis { register_name: "RAX".to_string(), hypothesized_role: "bitmask".to_string() },
+            ],
+            confidence_percent: Some(92),
+            notes_and_rationale: "Kernighan debug model hypothesis".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-ROUNDTRIP-001",
+            "CAE-1E-CAL-003",
+            "Model-Durable-Test",
+            "Original verbatim response predicting 9 + 13*k",
+            structured,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().expect("Freeze must succeed");
+        let orig_hash = record.canonical_sha256().to_string();
+
+        store.save_prediction(&record).expect("Save prediction should succeed");
+
+        // Load prediction back and verify all fields + canonical digest
+        let reloaded_pred = store.load_prediction("PRED-ROUNDTRIP-001").expect("Load prediction should succeed");
+        assert_eq!(reloaded_pred.prediction_id(), "PRED-ROUNDTRIP-001");
+        assert_eq!(reloaded_pred.experiment_id(), "CAE-1E-CAL-003");
+        assert_eq!(reloaded_pred.model_identifier(), "Model-Durable-Test");
+        assert_eq!(reloaded_pred.state(), PredictionState::Frozen);
+        assert_eq!(reloaded_pred.canonical_sha256(), orig_hash);
+        assert!(reloaded_pred.verify_integrity());
+
+        // 3. Evidence record roundtrip
+        let evidence = EvidenceRecord {
+            evidence_id: "EV-ROUNDTRIP-001".to_string(),
+            experiment_id: "CAE-1E-CAL-003".to_string(),
+            prediction_id: "PRED-ROUNDTRIP-001".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:30:00Z".to_string(),
+            native_trace: Some(NativeTraceEvidence {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: Some("sha256-dummy".to_string()),
+                compiler_profile: "Debug".to_string(),
+                test_inputs_evaluated: vec![0, 1, 32],
+                observed_instruction_counts: vec![(0, 8), (1, 29), (32, 680)],
+                loop_header_backedges_observed: Some(32),
+                total_backward_branches_observed: Some(32),
+                key_register_states_observed: vec!["RAX=result".to_string()],
+                trace_artifact_reference: "trace_debug_kernighan.txt".to_string(),
+            }),
+            discrepancy_summary: "Observed 8 + 21*k vs predicted 9 + 13*k".to_string(),
+            scientific_verdict: ScientificVerdict::PlausibleSemanticFailure,
+            verdict_explanation: "Stack spills and debug checks add 8 instructions per loop iteration".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+
+        store.append_evidence(&evidence).expect("Append evidence should succeed");
+        let reloaded_ev = store.load_evidence("EV-ROUNDTRIP-001").expect("Load evidence should succeed");
+        assert_eq!(evidence, reloaded_ev);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_corruption_and_tamper_detection() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_tamper_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 9, slope: 13 },
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(80),
+            notes_and_rationale: "Untampered record".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-TAMPER-001",
+            "CAE-1E-CAL-003",
+            "Model-X",
+            "Original prediction text",
+            structured,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().expect("Freeze must succeed");
+        store.save_prediction(&record).expect("Save must succeed");
+
+        // Tamper directly with the file on disk: alter the intercept from 9 to 8
+        let pred_file = temp_dir.join("predictions").join("PRED-TAMPER-001.prediction");
+        let file_content = std::fs::read_to_string(&pred_file).expect("File read should succeed");
+        let tampered_content = file_content.replace("Linear:9:13", "Linear:8:13");
+        std::fs::write(&pred_file, tampered_content).expect("Write tampered file must succeed");
+
+        // Reloading must detect the hash mismatch and fail with IntegrityViolation
+        let load_res = store.load_prediction("PRED-TAMPER-001");
+        assert!(matches!(load_res, Err(StorageError::IntegrityViolation { .. })), "Tampered file must fail integrity verification");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_rejection_of_unauthorized_overwrite() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_overwrite_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        let structured1 = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(196),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(90),
+            notes_and_rationale: "Initial hypothesis".to_string(),
+        };
+
+        let mut record1 = PredictionRecord::new_draft(
+            "PRED-OVERWRITE-001",
+            "CAE-1E-CAL-002",
+            "Model-A",
+            "196 instructions unrolled",
+            structured1,
+            "2026-11-17T12:00:00Z",
+        );
+        record1.freeze().expect("Freeze must succeed");
+        store.save_prediction(&record1).expect("Initial save must succeed");
+
+        // Attempt to save a modified hypothesis under the same prediction_id
+        let structured2 = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(200),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(95),
+            notes_and_rationale: "Tampered overwrite hypothesis".to_string(),
+        };
+
+        let mut record2 = PredictionRecord::new_draft(
+            "PRED-OVERWRITE-001",
+            "CAE-1E-CAL-002",
+            "Model-A",
+            "Different text",
+            structured2,
+            "2026-11-17T12:00:00Z",
+        );
+        record2.freeze().expect("Freeze must succeed");
+
+        let overwrite_res = store.save_prediction(&record2);
+        assert!(matches!(overwrite_res, Err(StorageError::UnauthorizedOverwrite { .. })), "Overwriting frozen prediction with differing content must be rejected");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_append_only_evidence_and_duplicate_rejection() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_evidence_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(20),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(99),
+            notes_and_rationale: "Reference release model".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-EVID-001",
+            "CAE-1E-CAL-006",
+            "Model-Ref",
+            "Reference popcount release",
+            structured,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().expect("Freeze must succeed");
+        store.save_prediction(&record).expect("Save prediction must succeed");
+
+        // 1. Evidence appending for non-existent prediction fails
+        let invalid_ev = EvidenceRecord {
+            evidence_id: "EV-ORPHAN".to_string(),
+            experiment_id: "CAE-1E-CAL-006".to_string(),
+            prediction_id: "PRED-NONEXISTENT".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:00:00Z".to_string(),
+            native_trace: None,
+            discrepancy_summary: "none".to_string(),
+            scientific_verdict: ScientificVerdict::UnsupportedEvaluation,
+            verdict_explanation: "none".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+        assert!(matches!(store.append_evidence(&invalid_ev), Err(StorageError::PredictionNotFound(..))));
+
+        // 2. Append valid evidence succeeds
+        let valid_ev = EvidenceRecord {
+            evidence_id: "EV-001".to_string(),
+            experiment_id: "CAE-1E-CAL-006".to_string(),
+            prediction_id: "PRED-EVID-001".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:00:00Z".to_string(),
+            native_trace: None,
+            discrepancy_summary: "Observed 20 instrs matches prediction".to_string(),
+            scientific_verdict: ScientificVerdict::VerifiedPrediction,
+            verdict_explanation: "Exact match on reference release".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+        assert!(store.append_evidence(&valid_ev).is_ok());
+
+        // 3. Duplicate evidence ID is rejected
+        assert!(matches!(store.append_evidence(&valid_ev), Err(StorageError::DuplicateEvidenceId(..))));
+
+        // 4. Query evidence for prediction
+        let list = store.list_evidence_for_prediction("PRED-EVID-001").expect("List evidence must succeed");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].evidence_id, "EV-001");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_recovery_from_incomplete_write() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_recovery_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        // Simulate an interrupted write leaving a temporary sibling file in predictions/
+        let orphan_tmp = temp_dir.join("predictions").join("PRED-ORPHAN.prediction.tmp.9999_12345678");
+        std::fs::write(&orphan_tmp, "partial content from crash").expect("Write tmp file must succeed");
+
+        // The store listing must ignore temporary files
+        let list = store.list_predictions().expect("Listing predictions should succeed");
+        assert!(!list.contains(&"PRED-ORPHAN".to_string()));
+
+        // Cleanup operation should quarantine or remove orphan tmp files
+        let cleaned = store.cleanup_interrupted_temporary_files().expect("Cleanup must succeed");
+        assert_eq!(cleaned, 1);
+        assert!(!orphan_tmp.exists(), "Orphan temporary file must be cleaned up");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_archival_of_disproven_prediction() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_disproven_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        // Create, freeze and save disproven hypothesis
+        let false_hypothesis = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 585, slope: 3 },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "64 iterations".to_string(),
+                backward_join_branches: None,
+            },
+            register_roles: vec![],
+            confidence_percent: Some(99),
+            notes_and_rationale: "Hypothesized naive loop survives in release build".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-DISPROVEN-STORE-001",
+            "CAE-1E-CAL-002",
+            "Model-Predictor",
+            "Predicts naive loop in release build.",
+            false_hypothesis,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().unwrap();
+        store.save_prediction(&record).expect("Initial freeze save must succeed");
+
+        // Link disproven evidence
+        let evidence = EvidenceRecord {
+            evidence_id: "EV-DISPROVEN-STORE-001".to_string(),
+            experiment_id: "CAE-1E-CAL-002".to_string(),
+            prediction_id: "PRED-DISPROVEN-STORE-001".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:15:00Z".to_string(),
+            native_trace: Some(NativeTraceEvidence {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                compiler_profile: "Release".to_string(),
+                test_inputs_evaluated: vec![0, 1, 7, 0x5555_5555_5555_5555, u64::MAX],
+                observed_instruction_counts: vec![(0, 196), (1, 196), (7, 196), (0x5555_5555_5555_5555, 196), (u64::MAX, 196)],
+                loop_header_backedges_observed: Some(0),
+                total_backward_branches_observed: Some(0),
+                key_register_states_observed: vec![],
+                trace_artifact_reference: "trace_release_naive.txt".to_string(),
+            }),
+            discrepancy_summary: "Observed flat 196 instrs and 0 backedges vs. predicted 585+3k with 64 backedges".to_string(),
+            scientific_verdict: ScientificVerdict::PlausibleSemanticFailure,
+            verdict_explanation: "LLVM completely unrolled loop into straight-line BT/ADC sequences; prediction falsified.".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+        store.append_evidence(&evidence).expect("Append evidence must succeed");
+
+        // Progress lifecycle strictly step-by-step: Frozen -> Verified -> Archived
+        record.mark_verified().unwrap();
+        store.save_prediction(&record).expect("Verified save must succeed");
+        record.archive().unwrap();
+        store.save_prediction(&record).expect("Archival save must succeed with same canonical digest");
+
+        // Reopen store from fresh instance and reload
+        let store2 = DurablePredictionStore::new(&temp_dir).expect("Reopening store should succeed");
+        let reloaded_pred = store2.load_prediction("PRED-DISPROVEN-STORE-001").expect("Reload must succeed");
+        let reloaded_ev = store2.load_evidence("EV-DISPROVEN-STORE-001").expect("Reload evidence must succeed");
+
+        assert_eq!(reloaded_pred.state(), PredictionState::Archived);
+        assert_eq!(reloaded_ev.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert!(reloaded_pred.verify_integrity());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+
+    #[test]
+    fn test_identifier_validation_rejects_malicious_and_reserved_names() {
+        // 1. Rejects empty
+        assert!(matches!(validate_identifier("", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+
+        // 2. Rejects path traversal and separators
+        assert!(matches!(validate_identifier("..", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier(".", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("../escaped", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("dir/file", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("dir\\file", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("C:file", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+
+        // 3. Rejects Windows reserved device names
+        assert!(matches!(validate_identifier("CON", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("prn", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("aux.txt", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("NUL", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("com1", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("lpt1", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+
+        // 4. Rejects illegal characters and trailing dots/spaces
+        assert!(matches!(validate_identifier("bad*id", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("bad?id", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("trailing. ", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+        assert!(matches!(validate_identifier("trailing.", "test_id"), Err(StorageError::InvalidIdentifier { .. })));
+
+        // 5. Accepts valid calibration and prediction identifiers
+        assert!(validate_identifier("CAE-1E-CAL-001", "experiment_id").is_ok());
+        assert!(validate_identifier("PRED-001", "prediction_id").is_ok());
+        assert!(validate_identifier("EV-001", "evidence_id").is_ok());
+        assert!(validate_identifier("model_alpha-v1.2", "model_id").is_ok());
+    }
+
+    #[test]
+    fn test_concurrent_lifecycle_state_conflict_rejection() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_conflict_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 9, slope: 13 },
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(85),
+            notes_and_rationale: "Conflict test".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-CONFLICT-001",
+            "CAE-1E-CAL-003",
+            "Model-Conflict",
+            "Verbatim prediction",
+            structured,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().unwrap();
+        store.save_prediction(&record).expect("Initial save must succeed");
+
+        // Thread/process A advances state strictly: Frozen -> Verified -> Archived
+        let mut record_a = record.clone();
+        record_a.mark_verified().unwrap();
+        store.save_prediction(&record_a).expect("Verified save must succeed");
+        record_a.archive().unwrap();
+        store.save_prediction(&record_a).expect("Archival save must succeed");
+
+        // Concurrent thread/process B had an older snapshot and tries to advance Frozen -> Verified
+        let mut record_b = record.clone();
+        record_b.mark_verified().unwrap();
+
+        let conflict_res = store.save_prediction(&record_b);
+        assert!(matches!(
+            conflict_res,
+            Err(StorageError::ConcurrentLifecycleConflict {
+                disk_state: PredictionState::Archived,
+                attempted_state: PredictionState::Verified,
+                ..
+            })
+        ), "Attempting stale lifecycle state update against newer disk state must be rejected");
+
+        // Verify the original archived record on disk was not clobbered
+        let reloaded = store.load_prediction("PRED-CONFLICT-001").unwrap();
+        assert_eq!(reloaded.state(), PredictionState::Archived);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_durable_storage_rejects_skipping_verification_stage() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_skip_verify_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation should succeed");
+
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(20),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(90),
+            notes_and_rationale: "Skip verify test".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-SKIP-001",
+            "CAE-1E-CAL-006",
+            "Model-Skip",
+            "Verbatim response text",
+            structured,
+            "2026-11-17T12:00:00Z",
+        );
+        record.freeze().unwrap();
+        store.save_prediction(&record).expect("Initial freeze save must succeed");
+
+        // Attempting to advance directly from Frozen to Archived (skipping Verified) on disk must be rejected
+        let mut skipped_record = record.clone();
+        skipped_record.mark_verified().unwrap();
+        skipped_record.archive().unwrap();
+
+        let res = store.save_prediction(&skipped_record);
+        assert!(matches!(
+            res,
+            Err(StorageError::ConcurrentLifecycleConflict {
+                disk_state: PredictionState::Frozen,
+                attempted_state: PredictionState::Archived,
+                ..
+            })
+        ), "Store must strictly reject jumping from Frozen to Archived without persisted verification stage");
+
+        // Verify disk state remains Frozen
+        let reloaded = store.load_prediction("PRED-SKIP-001").unwrap();
+        assert_eq!(reloaded.state(), PredictionState::Frozen);
+
+        // Advance to Verified
+        let mut verified_record = record.clone();
+        verified_record.mark_verified().unwrap();
+        store.save_prediction(&verified_record).expect("Advancing Frozen -> Verified must succeed");
+
+        // Attempting backwards transition (Verified -> Frozen) must be rejected
+        let res_backwards = store.save_prediction(&record);
+        assert!(matches!(
+            res_backwards,
+            Err(StorageError::ConcurrentLifecycleConflict {
+                disk_state: PredictionState::Verified,
+                attempted_state: PredictionState::Frozen,
+                ..
+            })
+        ), "Backwards transition from Verified to Frozen must be rejected");
+
+        // Advance to Archived
+        let mut archived_record = verified_record.clone();
+        archived_record.archive().unwrap();
+        store.save_prediction(&archived_record).expect("Advancing Verified -> Archived must succeed");
+
+        // Attempting backwards transition (Archived -> Verified) must be rejected
+        let res_archived_backwards = store.save_prediction(&verified_record);
+        assert!(matches!(
+            res_archived_backwards,
+            Err(StorageError::ConcurrentLifecycleConflict {
+                disk_state: PredictionState::Archived,
+                attempted_state: PredictionState::Verified,
+                ..
+            })
+        ), "Backwards transition from Archived to Verified must be rejected");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
