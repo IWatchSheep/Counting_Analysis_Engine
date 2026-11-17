@@ -14,6 +14,7 @@ pub mod native_trace;
 pub mod report;
 pub mod static_analysis;
 pub mod verification;
+pub mod llm_protocol;
 
 #[cfg(test)]
 mod tests {
@@ -25,6 +26,7 @@ mod tests {
     use super::native_trace::*;
     use super::static_analysis::*;
     use super::verification::*;
+    use super::llm_protocol::*;
 
     #[test]
     fn test_algorithms_agreement_on_standard_vectors() {
@@ -1019,5 +1021,314 @@ mod tests {
 
         assert_eq!(report.status, NativeTraceStatus::BudgetExhausted(50));
         assert_eq!(report.total_observed_instructions, 50);
+    }
+
+    // --- CAE-1E Phase 1: Experimental Protocol & Prediction Archive Tests ---
+
+    #[test]
+    fn test_sha256_nist_and_boundary_vectors() {
+        // NIST Vector 1: Empty string
+        assert_eq!(
+            compute_sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        // NIST Vector 2: "abc"
+        assert_eq!(
+            compute_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // NIST Vector 3: 56 bytes (single-block boundary condition padding check)
+        let msg56 = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        assert_eq!(msg56.len(), 56);
+        assert_eq!(
+            compute_sha256(msg56),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+
+        // Multi-block vector: 1000 repetitions of 'a'
+        let msg1000 = vec![b'a'; 1000];
+        assert_eq!(
+            compute_sha256(&msg1000),
+            "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
+        );
+    }
+
+    #[test]
+    fn test_experiment_definitions_calibration_set() {
+        let exps = ExperimentDefinition::populate_standard_calibration_experiments();
+        assert_eq!(exps.len(), 6, "Must define exactly 6 calibration experiments");
+
+        let mut ids = std::collections::HashSet::new();
+        for exp in &exps {
+            assert!(ids.insert(&exp.experiment_id), "Duplicate experiment ID: {}", exp.experiment_id);
+            assert_eq!(exp.classification, ExperimentClassification::Calibration);
+            assert!(!exp.permitted_information.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_canonical_digest_protects_all_prediction_fields() {
+        let base_structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 9, slope: 13 },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "64 iterations".to_string(),
+                backward_join_branches: Some("k joins".to_string()),
+            },
+            register_roles: vec![
+                RegisterRoleHypothesis { register_name: "RAX".to_string(), hypothesized_role: "accumulator".to_string() },
+            ],
+            confidence_percent: Some(85),
+            notes_and_rationale: "Analytical model".to_string(),
+        };
+
+        let base_record = PredictionRecord::new_draft(
+            "PRED-BASE",
+            "CAE-1E-CAL-003",
+            "Model-A",
+            "Initial prompt response text",
+            base_structured.clone(),
+            "2026-11-17T12:00:00Z",
+        );
+        let base_hash = base_record.compute_canonical_hash();
+
+        // 1. Changing original text changes digest
+        let mut r = base_record.clone();
+        r.update_draft(base_structured.clone(), "Modified response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 2. Changing instruction count hypothesis changes digest
+        let mut s_mod = base_structured.clone();
+        s_mod.instruction_count = InstructionCountHypothesis::Linear { intercept: 8, slope: 13 };
+        let mut r = base_record.clone();
+        r.update_draft(s_mod, "Initial prompt response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 3. Changing loop/branch hypothesis changes digest
+        let mut s_mod = base_structured.clone();
+        s_mod.loop_branch = LoopBranchHypothesis::Unrolled { explanation: "unrolled".to_string() };
+        let mut r = base_record.clone();
+        r.update_draft(s_mod, "Initial prompt response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 4. Changing register roles changes digest
+        let mut s_mod = base_structured.clone();
+        s_mod.register_roles.push(RegisterRoleHypothesis { register_name: "RCX".to_string(), hypothesized_role: "counter".to_string() });
+        let mut r = base_record.clone();
+        r.update_draft(s_mod, "Initial prompt response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 5. Changing confidence percent changes digest
+        let mut s_mod = base_structured.clone();
+        s_mod.confidence_percent = Some(95);
+        let mut r = base_record.clone();
+        r.update_draft(s_mod, "Initial prompt response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 6. Changing notes/rationale changes digest
+        let mut s_mod = base_structured.clone();
+        s_mod.notes_and_rationale = "Altered rationale".to_string();
+        let mut r = base_record.clone();
+        r.update_draft(s_mod, "Initial prompt response text").unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+
+        // 7. Changing model configuration changes digest
+        let mut r = base_record.clone();
+        r.set_model_configuration(Some("temp=0.7".to_string())).unwrap();
+        assert_ne!(r.compute_canonical_hash(), base_hash);
+    }
+
+    #[test]
+    fn test_prediction_record_lifecycle_and_immutability() {
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 9, slope: 13 },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "k backedges".to_string(),
+                backward_join_branches: None,
+            },
+            register_roles: vec![
+                RegisterRoleHypothesis { register_name: "RAX".to_string(), hypothesized_role: "bitmask".to_string() },
+            ],
+            confidence_percent: Some(85),
+            notes_and_rationale: "Analytical model of Kernighan popcount".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-001",
+            "CAE-1E-CAL-003",
+            "Model-GPT-Calibration",
+            "I predict 9 + 13*k instructions with k backedges.",
+            structured.clone(),
+            "2026-11-17T12:00:00Z",
+        );
+
+        assert_eq!(record.state(), PredictionState::Draft);
+        assert!(record.verify_integrity());
+
+        // Update draft allowed
+        let mut modified_structured = structured.clone();
+        modified_structured.confidence_percent = Some(90);
+        assert!(record.update_draft(modified_structured, "Updated text: 9 + 13*k").is_ok());
+        assert_eq!(record.structured_prediction().confidence_percent, Some(90));
+        assert!(record.verify_integrity());
+
+        // Freeze prediction
+        assert!(record.freeze().is_ok());
+        assert_eq!(record.state(), PredictionState::Frozen);
+        assert!(record.verify_integrity());
+
+        // Attempting to modify frozen prediction via any mutation method must be rejected
+        let rejected = record.update_draft(structured.clone(), "Illegal edit");
+        assert!(matches!(rejected, Err(PredictionProtocolError::FrozenPredictionImmutable { .. })));
+        let rejected_cfg = record.set_model_configuration(Some("temp=0".to_string()));
+        assert!(matches!(rejected_cfg, Err(PredictionProtocolError::FrozenPredictionImmutable { .. })));
+
+        // Cannot skip to Archived
+        assert!(record.archive().is_err());
+
+        // Transition Frozen -> Verified -> Archived
+        assert!(record.mark_verified().is_ok());
+        assert_eq!(record.state(), PredictionState::Verified);
+        assert!(record.archive().is_ok());
+        assert_eq!(record.state(), PredictionState::Archived);
+
+        // Cannot transition backwards
+        assert!(record.freeze().is_err());
+    }
+
+    #[test]
+    fn test_disproven_prediction_evaluation_and_archival() {
+        // Demonstrates that a disproven prediction can be evaluated (mark_verified)
+        // and archived with its PlausibleSemanticFailure verdict, without being falsely marked correct.
+        let false_hypothesis = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Linear { intercept: 585, slope: 3 },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "64 iterations".to_string(),
+                backward_join_branches: None,
+            },
+            register_roles: vec![],
+            confidence_percent: Some(99),
+            notes_and_rationale: "Hypothesized that release popcount retains 64-step loop".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-DISPROVEN-001",
+            "CAE-1E-CAL-002",
+            "Model-Predictor",
+            "Predicts naive loop in release build.",
+            false_hypothesis,
+            "2026-11-17T12:00:00Z",
+        );
+
+        record.freeze().unwrap();
+
+        // Link evidence showing complete unrolling (196 instructions, 0 backedges)
+        let evidence = EvidenceRecord {
+            evidence_id: "EV-DISPROVEN-001".to_string(),
+            experiment_id: "CAE-1E-CAL-002".to_string(),
+            prediction_id: "PRED-DISPROVEN-001".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:15:00Z".to_string(),
+            native_trace: Some(NativeTraceEvidence {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                compiler_profile: "Release".to_string(),
+                test_inputs_evaluated: vec![0, 1, 7, 0x5555_5555_5555_5555, u64::MAX],
+                observed_instruction_counts: vec![(0, 196), (1, 196), (7, 196), (0x5555_5555_5555_5555, 196), (u64::MAX, 196)],
+                loop_header_backedges_observed: Some(0),
+                total_backward_branches_observed: Some(0),
+                key_register_states_observed: vec![],
+                trace_artifact_reference: "trace_release_naive.txt".to_string(),
+            }),
+            discrepancy_summary: "Observed flat 196 instrs and 0 backedges vs. predicted 585+3k with 64 backedges".to_string(),
+            scientific_verdict: ScientificVerdict::PlausibleSemanticFailure,
+            verdict_explanation: "LLVM completely unrolled loop into straight-line BT/ADC sequences; prediction falsified.".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+
+        assert_eq!(evidence.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+
+        // Lifecycle transition: evaluation completed -> archived
+        assert!(record.mark_verified().is_ok());
+        assert_eq!(record.state(), PredictionState::Verified);
+        assert!(record.archive().is_ok());
+        assert_eq!(record.state(), PredictionState::Archived);
+    }
+
+    #[test]
+    fn test_instruction_count_hypothesis_evaluation() {
+        // Constant model
+        let c = InstructionCountHypothesis::Constant(196);
+        assert_eq!(c.evaluate_popcount(0), Some(196));
+        assert_eq!(c.evaluate_popcount(32), Some(196));
+
+        // Linear model: 9 + 13*k
+        let lin = InstructionCountHypothesis::Linear { intercept: 9, slope: 13 };
+        assert_eq!(lin.evaluate_popcount(0), Some(9));
+        assert_eq!(lin.evaluate_popcount(1), Some(22));
+        assert_eq!(lin.evaluate_popcount(32), Some(425));
+
+        // Piecewise popcount model: 4 if k=0, 5 + 5*k if k>=1
+        let piece = InstructionCountHypothesis::PiecewisePopcount {
+            zero_case: 4,
+            non_zero_intercept: 5,
+            non_zero_slope: 5,
+        };
+        assert_eq!(piece.evaluate_popcount(0), Some(4));
+        assert_eq!(piece.evaluate_popcount(1), Some(10));
+        assert_eq!(piece.evaluate_popcount(32), Some(165));
+
+        // Unknown and Abstention evaluate to None
+        let unk = InstructionCountHypothesis::Unknown { reason: "Indirect jump target not provided".to_string() };
+        assert_eq!(unk.evaluate_popcount(32), None);
+
+        let abst = InstructionCountHypothesis::Abstention { reason: "Cannot determine without knowing runtime helper".to_string() };
+        assert_eq!(abst.evaluate_popcount(32), None);
+    }
+
+    #[test]
+    fn test_evidence_provenance_linkage() {
+        let evidence = EvidenceRecord {
+            evidence_id: "EV-001".to_string(),
+            experiment_id: "CAE-1E-CAL-004".to_string(),
+            prediction_id: "PRED-001".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:05:00Z".to_string(),
+            native_trace: Some(NativeTraceEvidence {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: Some("dummy-hash".to_string()),
+                compiler_profile: "Release".to_string(),
+                test_inputs_evaluated: vec![0, 1, 7, 0x5555_5555_5555_5555, u64::MAX],
+                observed_instruction_counts: vec![(0, 4), (1, 10), (7, 40), (0x5555_5555_5555_5555, 165), (u64::MAX, 325)],
+                loop_header_backedges_observed: Some(31),
+                total_backward_branches_observed: Some(31),
+                key_register_states_observed: vec!["RCX=0".to_string(), "EAX=result".to_string()],
+                trace_artifact_reference: "native_trace_log_001.txt".to_string(),
+            }),
+            discrepancy_summary: "Observed counts match piecewise formula: 4 if k=0 else 5 + 5*k".to_string(),
+            scientific_verdict: ScientificVerdict::VerifiedPrediction,
+            verdict_explanation: "Predicted linear loop matches native single-step trace in release profile.".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+
+        assert_eq!(evidence.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+        assert!(!evidence.evidence_disclosed_prior_to_prediction);
+    }
+
+    #[test]
+    fn test_unresolved_discrepancy_and_missing_evidence_handling() {
+        let unresolved = EvidenceRecord {
+            evidence_id: "EV-002".to_string(),
+            experiment_id: "CAE-1E-CAL-001".to_string(),
+            prediction_id: "PRED-002".to_string(),
+            collection_timestamp_iso8601: "2026-11-17T12:10:00Z".to_string(),
+            native_trace: None,
+            discrepancy_summary: "Execution trace was interrupted by debugger timeout".to_string(),
+            scientific_verdict: ScientificVerdict::UnresolvedDiscrepancy,
+            verdict_explanation: "Trace incomplete; cannot assign attribution to predictor or harness.".to_string(),
+            evidence_disclosed_prior_to_prediction: false,
+        };
+
+        assert_eq!(unresolved.scientific_verdict, ScientificVerdict::UnresolvedDiscrepancy);
+        assert!(unresolved.native_trace.is_none(), "Missing evidence must be represented as None without fabrication");
     }
 }
