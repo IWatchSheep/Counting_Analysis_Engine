@@ -7,6 +7,7 @@
 pub mod algorithms;
 pub mod archive;
 pub mod dynamic_analysis;
+pub mod emulation;
 pub mod instrumentation;
 pub mod report;
 pub mod static_analysis;
@@ -17,6 +18,7 @@ mod tests {
     use super::algorithms::*;
     use super::archive::*;
     use super::dynamic_analysis::*;
+    use super::emulation::*;
     use super::instrumentation::*;
     use super::static_analysis::*;
     use super::verification::*;
@@ -201,5 +203,231 @@ mod tests {
         assert!(accepted, "Archive must contain accepted optimizations");
         assert!(cond_accepted, "Archive must contain conditionally accepted optimizations");
         assert!(rejected, "Archive must contain rejected optimizations");
+    }
+
+    // --- CAE-1D Phase 1: Machine-Code Emulation & Tracing Tests ---
+
+    #[test]
+    fn test_emulation_exp_a_straight_line() {
+        let report = MicroExperiments::run_experiment_a(42);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.termination_reason, TerminationReason::NormalRet);
+        // Formula: (42 + 10) * 2 = 104
+        assert_eq!(report.return_value, 104);
+        assert_eq!(report.instruction_count, 4);
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["Mov", "Add", "Shl", "Ret"]);
+    }
+
+    #[test]
+    fn test_emulation_exp_b_branch_even_not_taken() {
+        // Input 10 is even -> test rcx, 1 produces ZF=1 -> JNZ is NOT taken -> executes mov eax, 100, ret
+        let report = MicroExperiments::run_experiment_b(10);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.return_value, 100);
+        assert_eq!(report.instruction_count, 4);
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["Test", "Jne", "Mov", "Ret"]);
+    }
+
+    #[test]
+    fn test_emulation_exp_b_branch_odd_taken() {
+        // Input 11 is odd -> test rcx, 1 produces ZF=0 -> JNZ IS taken -> executes mov eax, 200, ret
+        let report = MicroExperiments::run_experiment_b(11);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.return_value, 200);
+        assert_eq!(report.instruction_count, 4); // test, jnz [taken], mov 200, ret
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["Test", "Jne", "Mov", "Ret"]);
+    }
+
+    #[test]
+    fn test_emulation_exp_c_bounded_loop_zero() {
+        // Loop count 0: xor, test, jz [taken to ret], ret
+        let report = MicroExperiments::run_experiment_c(0);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.return_value, 0);
+        assert_eq!(report.instruction_count, 4);
+    }
+
+    #[test]
+    fn test_emulation_exp_c_bounded_loop_one() {
+        // Loop count 1: xor, (test, jz [not taken], add, dec, jmp) * 1, test, jz [taken], ret
+        let report = MicroExperiments::run_experiment_c(1);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.return_value, 1);
+        assert_eq!(report.instruction_count, 9);
+    }
+
+    #[test]
+    fn test_emulation_exp_c_bounded_loop_five() {
+        // Loop count 5: sum = 5+4+3+2+1 = 15. Total steps = 4 + 5 * 5 = 29.
+        let report = MicroExperiments::run_experiment_c(5);
+        assert_eq!(report.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(report.return_value, 15);
+        assert_eq!(report.instruction_count, 29);
+    }
+
+    #[test]
+    fn test_emulation_execution_budget_exhaustion() {
+        // Infinite loop: jmp $ (EB FE)
+        let infinite_loop: &[u8] = &[0xEB, 0xFE];
+        let mut emu = X64MicroEmulator::new(infinite_loop, 0, 0, 50);
+        let report = emu.run_trace("EXP-INF", "Infinite Loop", 0);
+
+        assert_eq!(report.status, EmulationStatus::BudgetExceeded);
+        assert_eq!(report.termination_reason, TerminationReason::BudgetExhausted(50));
+        assert_eq!(report.instruction_count, 50);
+    }
+
+    #[test]
+    fn test_emulation_invalid_opcode_handling() {
+        // Invalid opcode: 0x0F, 0x0B (UD2 - undefined instruction)
+        let invalid_code: &[u8] = &[0x0F, 0x0B];
+        let mut emu = X64MicroEmulator::new(invalid_code, 0, 0, 10);
+        let report = emu.run_trace("EXP-INV", "Invalid Opcode UD2", 0);
+
+        let corrupt_code: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
+        let mut corrupt_emu = X64MicroEmulator::new(corrupt_code, 0, 0, 10);
+        let corrupt_report = corrupt_emu.run_trace("EXP-CORRUPT", "Corrupted Opcode", 0);
+
+        assert!(
+            matches!(report.termination_reason, TerminationReason::UnsupportedInstruction(_))
+                || matches!(corrupt_report.termination_reason, TerminationReason::InvalidOpcode(_))
+                || matches!(corrupt_report.termination_reason, TerminationReason::UnsupportedInstruction(_))
+        );
+    }
+
+    #[test]
+    fn test_emulation_repeatability_and_state_isolation() {
+        let r1 = MicroExperiments::run_experiment_c(5);
+        let r2 = MicroExperiments::run_experiment_c(5);
+
+        assert_eq!(r1.instruction_count, r2.instruction_count);
+        assert_eq!(r1.return_value, r2.return_value);
+        assert_eq!(r1.steps.len(), r2.steps.len());
+
+        for i in 0..r1.steps.len() {
+            assert_eq!(r1.steps[i].address, r2.steps[i].address);
+            assert_eq!(r1.steps[i].mnemonic, r2.steps[i].mnemonic);
+            assert_eq!(r1.steps[i].registers_after, r2.steps[i].registers_after);
+        }
+    }
+
+    #[test]
+    fn test_emulation_assess_live_popcount_functions() {
+        let test_val = 0x5555_5555_5555_5555u64;
+
+        // 1. Reference
+        let ref_rep = X64MicroEmulator::trace_live_function(
+            popcount_reference as *const (),
+            "popcount_reference",
+            test_val,
+            100,
+        );
+        eprintln!("\n=== Live popcount_reference Assessment ===");
+        match ref_rep {
+            Ok(rep) => {
+                eprintln!("Status: {:?}", rep.status);
+                eprintln!("Reason: {:?}", rep.termination_reason);
+                eprintln!("Steps: {}", rep.instruction_count);
+                eprintln!("Result: {} (expected {})", rep.return_value, test_val.count_ones());
+                for s in &rep.steps {
+                    eprintln!("  0x{:X}: {} {}", s.address, s.mnemonic, s.operands_str);
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+
+        // 2. Kernighan
+        let kern_rep = X64MicroEmulator::trace_live_function(
+            popcount_kernighan as *const (),
+            "popcount_kernighan",
+            test_val,
+            2_000,
+        );
+        eprintln!("\n=== Live popcount_kernighan Assessment ===");
+        match kern_rep {
+            Ok(rep) => {
+                eprintln!("Status: {:?}", rep.status);
+                eprintln!("Reason: {:?}", rep.termination_reason);
+                eprintln!("Steps: {}", rep.instruction_count);
+                eprintln!("Result: {} (expected {})", rep.return_value, test_val.count_ones());
+                if rep.status != EmulationStatus::CompletedSuccess {
+                    eprintln!("Last step: {:?}", rep.steps.last().map(|s| (&s.mnemonic, &s.operands_str)));
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+
+        // 3. Naive
+        let naive_rep = X64MicroEmulator::trace_live_function(
+            popcount_naive as *const (),
+            "popcount_naive",
+            test_val,
+            2_000,
+        );
+        eprintln!("\n=== Live popcount_naive Assessment ===");
+        match naive_rep {
+            Ok(rep) => {
+                eprintln!("Status: {:?}", rep.status);
+                eprintln!("Reason: {:?}", rep.termination_reason);
+                eprintln!("Steps: {}", rep.instruction_count);
+                eprintln!("Result: {} (expected {})", rep.return_value, test_val.count_ones());
+                if rep.status != EmulationStatus::CompletedSuccess {
+                    eprintln!("Last step: {:?}", rep.steps.last().map(|s| (&s.mnemonic, &s.operands_str)));
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_emulation_differential_oracle_comparison() {
+        let test_cases = [
+            ("Zero", 0u64),
+            ("Sparse (1 bit)", 1u64),
+            ("Small (3 bits)", 7u64),
+            ("Alternating (32 bits)", 0x5555_5555_5555_5555u64),
+            ("Dense (64 bits)", u64::MAX),
+        ];
+
+        for (name, val) in test_cases {
+            let native_kern = popcount_kernighan(val);
+            let emu_kern = X64MicroEmulator::trace_live_function(
+                popcount_kernighan as *const (),
+                "popcount_kernighan",
+                val,
+                5_000,
+            ).expect("Kernighan emulation failed");
+
+            assert_eq!(emu_kern.status, EmulationStatus::CompletedSuccess);
+            assert_eq!(
+                emu_kern.return_value as u32, native_kern,
+                "Differential mismatch on {} (val=0x{:X}): native={}, emulator={}",
+                name, val, native_kern, emu_kern.return_value
+            );
+
+            let native_ref = popcount_reference(val);
+            let emu_ref = X64MicroEmulator::trace_live_function(
+                popcount_reference as *const (),
+                "popcount_reference",
+                val,
+                500,
+            ).expect("Reference emulation failed");
+
+            assert_eq!(emu_ref.status, EmulationStatus::CompletedSuccess);
+            assert_eq!(
+                emu_ref.return_value as u32, native_ref,
+                "Differential mismatch on {} (val=0x{:X}): native={}, emulator={}",
+                name, val, native_ref, emu_ref.return_value
+            );
+
+            eprintln!("Differential Match on {}: native={}, emu_kern_steps={}, emu_ref_steps={}",
+                name, native_kern, emu_kern.instruction_count, emu_ref.instruction_count);
+        }
     }
 }
