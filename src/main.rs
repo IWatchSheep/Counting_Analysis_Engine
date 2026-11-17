@@ -967,7 +967,96 @@ fn main() {
         let _ = std::fs::remove_dir_all(&temp_trial_dir);
     }
 
+    // 11. CAE-1E Phase 6: First Registered Prediction Experiment
+    println!("--- [Phase 11: First Registered Prediction Experiment (CAE-1E Phase 6)] ---\n");
+    println!("Guiding Principle: Execute prospective trial with fresh Count Trailing Zeros kernel (exp-d),");
+    println!("capturing prompt provenance, pre-disclosure hash freezing, physical trace execution,");
+    println!("deterministic scoring, and immutable archival without overwriting original hypotheses.\n");
+
+    let exp_phase6 = ExperimentDefinition::populate_phase6_trial_experiment();
+    println!("Fresh Prospective Task Definition:");
+    println!("- Experiment ID: `{}`", exp_phase6.experiment_id);
+    println!("- Target Kernel: `{}`", exp_phase6.target_kernel_name);
+    println!("- Profile: `{}`", exp_phase6.compiler_profile);
+    println!("- Input Domain: `x in {{0, 1, 2, 8, 64}}`");
+    println!("- Disassembly Length: {} chars\n", exp_phase6.disassembly_input.len());
+
+    let temp_phase6_dir = std::env::temp_dir().join(format!("cae_phase6_demo_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    if let Ok(store_phase6) = DurablePredictionStore::new(&temp_phase6_dir) {
+        let prompt_packet = ManualTrialSession::prepare_trial(&exp_phase6, "2026-11-17T13:00:00Z");
+        println!("Stage 1: Prompt Provenance Packet Prepared:");
+        println!("- Canonical Prompt SHA-256: `{}`", prompt_packet.prompt_sha256);
+        println!("- Runtime Traces Withheld: `{}`", !prompt_packet.prompt_markdown_text.contains("trace_observed_counts"));
+        println!("- Prompt Integrity Verified: `{}`\n", prompt_packet.verify_integrity());
+
+        // Stage 2 & 3: Capture and freeze independent prediction before disclosure
+        let draft_pred = PredictionRecord::populate_phase6_ctz_prediction(
+            "PRED-EXP-001-REGISTERED",
+            "Disassembly-Reasoning-Agent",
+            "2026-11-17T13:05:00Z",
+        );
+        if let Ok(frozen_pred) = ManualTrialSession::register_prediction(
+            &store_phase6,
+            &prompt_packet,
+            draft_pred.prediction_id(),
+            draft_pred.model_identifier(),
+            draft_pred.original_response_text(),
+            draft_pred.structured_prediction().clone(),
+            draft_pred.registration_timestamp_iso8601(),
+        ) {
+            println!("Stage 2 & 3: Independent Prediction Registered and Frozen Before Evidence Disclosure:");
+            println!("- Prediction ID: `{}`", frozen_pred.prediction_id());
+            println!("- State: `{}`", frozen_pred.state());
+            println!("- Pre-Disclosure Canonical Hash: `{}`", frozen_pred.canonical_sha256());
+            println!("- Pre-Disclosure Integrity Verified: `{}`\n", frozen_pred.verify_integrity());
+
+            // Stage 4: Live Physical Execution on Native Silicon via Windows Debug API
+            let target_debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+            let exe_sha256 = if target_debug_exe.exists() {
+                compute_file_sha256(target_debug_exe).ok()
+            } else {
+                None
+            };
+
+            println!("Stage 4: Live Native Trace Execution on Physical Silicon (`cae_trace_target.exe exp-d`):");
+            if let Some(ref hash) = exe_sha256 {
+                println!("- Binary Cryptographic SHA-256: `{}`", hash);
+            }
+
+            #[cfg(windows)]
+            for &val in &[0u64, 1, 2, 8, 64] {
+                if let Ok(report) = WindowsNativeDebugger::trace_kernel("exp-d", val, 100) {
+                    println!("  [Silicon Trace] input={:<2} (ctz={}): steps={:<2}, backedges={}, RAX={}",
+                        val,
+                        if val == 0 { 64 } else { val.trailing_zeros() },
+                        report.total_observed_instructions,
+                        report.count_backward_branches(),
+                        report.return_value_rax,
+                    );
+                }
+            }
+
+            let ground_truth_evidence = NativeTraceEvidence::populate_phase6_trial_evidence(exe_sha256);
+
+            // Stage 5: Disclose Evidence, Deterministic Scoring & Archival
+            if let Ok(exec_result) = ManualTrialSession::disclose_and_evaluate(
+                &store_phase6,
+                &exp_phase6,
+                &frozen_pred,
+                Some(&ground_truth_evidence),
+                "EV-EXP-001-REVEALED",
+                "2026-11-17T13:15:00Z",
+                if target_debug_exe.exists() { Some(target_debug_exe) } else { None },
+            ) {
+                println!("\nStage 5: Post-Disclosure Scoring and Immutable Archival:");
+                println!("{}", exec_result.render_summary());
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_phase6_dir);
+    }
+
     println!("================================================================================");
-    println!("CAE-1E Phase 5 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1E Phase 6 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }

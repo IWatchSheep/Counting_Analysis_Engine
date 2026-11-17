@@ -867,6 +867,7 @@ impl WindowsNativeDebugger {
             "exp-a" => "Straight-Line Instructions",
             "exp-b" => "Conditional Branching",
             "exp-c" => "Bounded Loop Counter",
+            "exp-d" => "Count Trailing Zeros Loop",
             "kernighan" => "Brian Kernighan Popcount (Live Compiled)",
             "naive" => "Naive Shift-and-Count Popcount (Live Compiled)",
             "reference" => "Rust count_ones() Reference (Live Compiled)",

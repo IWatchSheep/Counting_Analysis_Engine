@@ -80,6 +80,32 @@ unsafe fn run_kernel_c(input: u64) -> u64 {
 
 #[inline(never)]
 #[cfg(target_arch = "x86_64")]
+unsafe fn run_kernel_d(input: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 3",            // Entry Trigger
+            "xor eax, eax",     // Step 1: count = 0
+            "6:",
+            "test rcx, rcx",    // Step 2: if rcx == 0, exit
+            "jz 7f",            // Step 3
+            "test rcx, 1",      // Step 4: test lowest bit
+            "jnz 7f",           // Step 5: if bit is 1, exit
+            "shr rcx, 1",       // Step 6: shift right by 1
+            "inc eax",          // Step 7: count++
+            "jmp 6b",           // Step 8: backedge
+            "7:",
+            "int 3",            // Exit Trigger
+            in("rcx") input,
+            out("rax") result,
+            options(nostack)
+        );
+    }
+    result
+}
+
+#[inline(never)]
+#[cfg(target_arch = "x86_64")]
 unsafe fn run_kernel_kernighan(input: u64) -> u32 {
     let result: u32;
     unsafe {
@@ -142,7 +168,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: cae_trace_target <kernel_name> [input_value]");
-        eprintln!("Available kernels: exp-a, exp-b, exp-c, kernighan, naive, reference");
+        eprintln!("Available kernels: exp-a, exp-b, exp-c, exp-d, kernighan, naive, reference");
         return;
     }
 
@@ -170,6 +196,10 @@ fn main() {
             }
             "exp-c" => {
                 let res = run_kernel_c(input);
+                println!("RESULT: {}", res);
+            }
+            "exp-d" => {
+                let res = run_kernel_d(input);
                 println!("RESULT: {}", res);
             }
             "kernighan" => {

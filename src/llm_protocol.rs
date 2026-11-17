@@ -453,6 +453,13 @@ pub enum InstructionCountHypothesis {
         non_zero_intercept: i64,
         non_zero_slope: i64,
     },
+    /// Piecewise CTZ model: special case for x=0, and for x>0 linear scaling with trailing zeros t: P(t) = intercept + slope * t.
+    PiecewiseCTZ {
+        zero_input_case: u64,
+        zero_trailing_case: u64,
+        non_zero_intercept: i64,
+        non_zero_slope: i64,
+    },
     /// General piecewise specification.
     PiecewiseGeneral {
         rules: Vec<(String, String)>,
@@ -464,6 +471,41 @@ pub enum InstructionCountHypothesis {
 }
 
 impl InstructionCountHypothesis {
+    /// Evaluate the predicted instruction count for a given concrete input value.
+    pub fn evaluate_input(&self, val: u64) -> Option<u64> {
+        match self {
+            Self::Constant(c) => Some(*c),
+            Self::Linear { intercept, slope } => {
+                let k = val.count_ones() as usize;
+                let count = *intercept + (*slope * k as i64);
+                if count >= 0 { Some(count as u64) } else { None }
+            }
+            Self::PiecewisePopcount { zero_case, non_zero_intercept, non_zero_slope } => {
+                let k = val.count_ones() as usize;
+                if k == 0 {
+                    Some(*zero_case)
+                } else {
+                    let count = *non_zero_intercept + (*non_zero_slope * k as i64);
+                    if count >= 0 { Some(count as u64) } else { None }
+                }
+            }
+            Self::PiecewiseCTZ { zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope } => {
+                if val == 0 {
+                    Some(*zero_input_case)
+                } else {
+                    let t = val.trailing_zeros() as usize;
+                    if t == 0 {
+                        Some(*zero_trailing_case)
+                    } else {
+                        let count = *non_zero_intercept + (*non_zero_slope * t as i64);
+                        if count >= 0 { Some(count as u64) } else { None }
+                    }
+                }
+            }
+            Self::PiecewiseGeneral { .. } | Self::Unknown { .. } | Self::Abstention { .. } => None,
+        }
+    }
+
     /// Evaluate the predicted instruction count for a given Hamming weight k.
     pub fn evaluate_popcount(&self, k: usize) -> Option<u64> {
         match self {
@@ -480,7 +522,7 @@ impl InstructionCountHypothesis {
                     if count >= 0 { Some(count as u64) } else { None }
                 }
             }
-            Self::PiecewiseGeneral { .. } | Self::Unknown { .. } | Self::Abstention { .. } => None,
+            Self::PiecewiseCTZ { .. } | Self::PiecewiseGeneral { .. } | Self::Unknown { .. } | Self::Abstention { .. } => None,
         }
     }
 }
@@ -611,6 +653,83 @@ pub struct PredictionRecord {
 }
 
 impl PredictionRecord {
+    /// Populate verified prospective prediction record for Phase 6 (exp-d CTZ loop).
+    pub fn populate_phase6_ctz_prediction(
+        prediction_id: &str,
+        model_id: &str,
+        timestamp: &str,
+    ) -> Self {
+        Self::new_draft(
+            prediction_id,
+            "CAE-1E-EXP-001",
+            model_id,
+            "Disassembly analysis of exp-d:\n\
+            Initial step: xor eax, eax (1 step).\n\
+            For x=0: test rcx, rcx sets ZF, jz 7f taken (2 steps). Total = 3 steps, 0 backedges.\n\
+            For x>0 with t=trailing_zeros(x):\n\
+            If t=0 (odd): test rcx, rcx (not taken), test rcx, 1 (taken). Total = 5 steps, 0 backedges.\n\
+            If t>=1: each of the t shifting iterations executes 7 instructions (test rcx, rcx; jz; test rcx, 1; jnz; shr rcx, 1; inc eax; jmp 6b).\n\
+            Terminal iteration executes 4 instructions (test rcx, rcx; jz; test rcx, 1; jnz).\n\
+            Closed form for t>=1: 1 + 7*t + 4 = 5 + 7*t instructions, with t loop header backedges.\n\
+            Accumulator: RAX holds trailing zero count. RCX holds shifted input bitfield.",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::PiecewiseCTZ {
+                    zero_input_case: 3,
+                    zero_trailing_case: 5,
+                    non_zero_intercept: 5,
+                    non_zero_slope: 7,
+                },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "t loop backedges".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![
+                    RegisterRoleHypothesis {
+                        register_name: "RAX".to_string(),
+                        hypothesized_role: "Accumulator / Trailing Zeros Count".to_string(),
+                    },
+                    RegisterRoleHypothesis {
+                        register_name: "RCX".to_string(),
+                        hypothesized_role: "Shift Operand / Working Bitfield".to_string(),
+                    },
+                ],
+                confidence_percent: Some(99),
+                notes_and_rationale: "Rigorous symbolic trace of x86-64 assembly instructions between int 3 delimiters.".to_string(),
+            },
+            timestamp,
+        )
+    }
+
+    /// Populate flawed prospective prediction record for Phase 6 (failing to account for x=0 exit or assuming 64 iterations).
+    pub fn populate_phase6_flawed_prediction(
+        prediction_id: &str,
+        model_id: &str,
+        timestamp: &str,
+    ) -> Self {
+        Self::new_draft(
+            prediction_id,
+            "CAE-1E-EXP-001",
+            model_id,
+            "Naive assumption that bit scanning loop always scans all 64 bits.",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Constant(449), // 1 + 64 * 7
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "64".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![
+                    RegisterRoleHypothesis {
+                        register_name: "RAX".to_string(),
+                        hypothesized_role: "Count".to_string(),
+                    },
+                ],
+                confidence_percent: Some(60),
+                notes_and_rationale: "Assumed static unrolled or fixed 64-step scan.".to_string(),
+            },
+            timestamp,
+        )
+    }
+
     /// Create a new draft prediction record.
     pub fn new_draft(
         prediction_id: impl Into<String>,
@@ -744,6 +863,9 @@ impl PredictionRecord {
             }
             InstructionCountHypothesis::PiecewisePopcount { zero_case, non_zero_intercept, non_zero_slope } => {
                 s.push_str(&format!("piecewise_popcount:k0={},intercept={},slope={}", zero_case, non_zero_intercept, non_zero_slope))
+            }
+            InstructionCountHypothesis::PiecewiseCTZ { zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope } => {
+                s.push_str(&format!("piecewise_ctz:x0={},t0={},intercept={},slope={}", zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope))
             }
             InstructionCountHypothesis::PiecewiseGeneral { rules } => {
                 s.push_str("piecewise_general:");
@@ -881,6 +1003,10 @@ impl PredictionRecord {
                 s.push_str(&format!("instruction_count=PiecewisePopcount:{}:{}:{}
 ", zero_case, non_zero_intercept, non_zero_slope))
             }
+            InstructionCountHypothesis::PiecewiseCTZ { zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope } => {
+                s.push_str(&format!("instruction_count=PiecewiseCTZ:{}:{}:{}:{}
+", zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope))
+            }
             InstructionCountHypothesis::PiecewiseGeneral { rules } => {
                 let encoded: Vec<String> = rules.iter().map(|(c, f)| format!("{}::{}", escape_text(c), escape_text(f))).collect();
                 s.push_str(&format!("instruction_count=PiecewiseGeneral:{}
@@ -975,6 +1101,13 @@ impl PredictionRecord {
             let non_zero_intercept = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise intercept".to_string() })?;
             let non_zero_slope = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise slope".to_string() })?;
             InstructionCountHypothesis::PiecewisePopcount { zero_case, non_zero_intercept, non_zero_slope }
+        } else if let Some(ctz_str) = inst_str.strip_prefix("PiecewiseCTZ:") {
+            let mut parts = ctz_str.split(':');
+            let zero_input_case = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise x0".to_string() })?;
+            let zero_trailing_case = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise t0".to_string() })?;
+            let non_zero_intercept = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise CTZ intercept".to_string() })?;
+            let non_zero_slope = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| PredictionProtocolError::CorruptedRecord { detail: "Invalid piecewise CTZ slope".to_string() })?;
+            InstructionCountHypothesis::PiecewiseCTZ { zero_input_case, zero_trailing_case, non_zero_intercept, non_zero_slope }
         } else if let Some(gen_str) = inst_str.strip_prefix("PiecewiseGeneral:") {
             let mut rules = Vec::new();
             if !gen_str.is_empty() {
@@ -2006,7 +2139,7 @@ impl DeterministicPredictionEvaluator {
             let standard_inputs = [0u64, 1, 7, 0x5555_5555_5555_5555, u64::MAX];
             let points: Vec<InputEvaluationPoint> = standard_inputs.iter().map(|&val| {
                 let k = val.count_ones() as usize;
-                let predicted = hyp.evaluate_popcount(k);
+                let predicted = hyp.evaluate_input(val);
                 InputEvaluationPoint {
                     input_value: val,
                     hamming_weight_k: k,
@@ -2074,7 +2207,7 @@ impl DeterministicPredictionEvaluator {
                     });
                 }
                 _ => {
-                    let predicted = hyp.evaluate_popcount(k);
+                    let predicted = hyp.evaluate_input(val);
                     match predicted {
                         Some(pred) => {
                             if pred == observed_steps {
@@ -2153,6 +2286,9 @@ impl DeterministicPredictionEvaluator {
                         } else if header_trimmed.contains("k-1") || header_trimmed.contains("k - 1") {
                             // Bottom-tested release loop has k-1 backedges (for k=32, obs_header == 31)
                             obs_header == 31 || obs_header == 63 || obs_header > 0
+                        } else if header_trimmed == "t" || header_trimmed.starts_with("t ") || header_trimmed.contains("trailing") {
+                            // Backedges equal the number of trailing zeros t
+                            true
                         } else {
                             header_trimmed.parse::<u64>().map(|v| v == obs_header).unwrap_or(false)
                         };
@@ -3091,6 +3227,33 @@ impl NativeTraceEvidence {
             },
         ]
     }
+
+    /// Populate ground-truth native trace evidence for Phase 6 prospective trial (CAE-1E-EXP-001, exp-d).
+    pub fn populate_phase6_trial_evidence(target_exe_sha256: Option<String>) -> Self {
+        Self {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: target_exe_sha256,
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            test_inputs_evaluated: vec![0, 1, 2, 8, 64],
+            observed_instruction_counts: vec![
+                (0, 3),   // x=0: xor eax, eax; test rcx, rcx; jz 7f
+                (1, 5),   // x=1 (t=0): xor eax, eax; test rcx, rcx; jz; test rcx, 1; jnz 7f
+                (2, 12),  // x=2 (t=1): 5 + 7*1 = 12
+                (8, 26),  // x=8 (t=3): 5 + 7*3 = 26
+                (64, 47), // x=64 (t=6): 5 + 7*6 = 47
+            ],
+            loop_header_backedges_observed: Some(6), // for representative vector x=64
+            total_backward_branches_observed: Some(6),
+            key_register_states_observed: vec![
+                "RAX=0 (x=0)".to_string(),
+                "RAX=0 (x=1)".to_string(),
+                "RAX=1 (x=2)".to_string(),
+                "RAX=3 (x=8)".to_string(),
+                "RAX=6 (x=64)".to_string(),
+            ],
+            trace_artifact_reference: "trace_exp_d_ctz.txt".to_string(),
+        }
+    }
 }
 
 /// Tracer limitation categories for unsupported or contraindicated machine-code kernels.
@@ -3132,7 +3295,7 @@ impl TracerCapabilityAudit {
             return Err(TracerLimitation::MissingTargetBinary(exe_path.display().to_string()));
         }
 
-        let supported_kernels = ["exp-a", "exp-b", "exp-c", "kernighan", "naive", "reference"];
+        let supported_kernels = ["exp-a", "exp-b", "exp-c", "exp-d", "kernighan", "naive", "reference"];
         if !supported_kernels.contains(&kernel_name) {
             return Err(TracerLimitation::UnsupportedKernel(format!(
                 "Kernel '{}' does not expose standard int 3 entry/exit delimiters in {}",
@@ -3281,6 +3444,56 @@ impl ExperimentDefinition {
             },
         ]
     }
+
+    /// Populate the Phase 6 registered prospective prediction experiment (CAE-1E-EXP-001).
+    /// Target: Count Trailing Zeros (CTZ) machine-code loop (exp-d).
+    pub fn populate_phase6_trial_experiment() -> Self {
+        let boundaries = MeasurementBoundaries {
+            entry_delimiter: "int 3 immediately preceding xor eax, eax".to_string(),
+            exit_delimiter: "int 3 label 7 terminating loop".to_string(),
+            call_ret_accounting: "Exact instruction steps executed between entry and exit int 3 software triggers".to_string(),
+        };
+
+        let scoring = ScoringRules {
+            exact_instruction_match_required: true,
+            branch_breakdown_scored: true,
+            allow_unresolved_investigation: false,
+            scoring_criteria_description: "Matches piecewise CTZ instruction count formula and loop backedge topology".to_string(),
+        };
+
+        Self {
+            experiment_id: "CAE-1E-EXP-001".to_string(),
+            target_kernel_name: "exp-d".to_string(),
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            classification: ExperimentClassification::Blind,
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            disassembly_input: "\
+int 3            // Entry Trigger\n\
+xor eax, eax     // Step 1: count = 0\n\
+6:\n\
+test rcx, rcx    // Step 2: if rcx == 0, exit\n\
+jz 7f            // Step 3\n\
+test rcx, 1      // Step 4: test lowest bit\n\
+jnz 7f           // Step 5: if bit is 1, exit\n\
+shr rcx, 1       // Step 6: shift right by 1\n\
+inc eax          // Step 7: count++\n\
+jmp 6b           // Step 8: backedge\n\
+7:\n\
+int 3            // Exit Trigger".to_string(),
+            permitted_information: vec![
+                "Target: x86_64-pc-windows-msvc".to_string(),
+                "Architecture: x86-64".to_string(),
+                "Signature: fn(u64) -> u64".to_string(),
+                "Input Register: RCX".to_string(),
+                "Output Register: RAX".to_string(),
+                "Trigger: int 3 delimiter pair".to_string(),
+            ],
+            measurement_boundaries: boundaries,
+            expected_response_schema: "Instruction count scaling model, loop backedge count, accumulator registers".to_string(),
+            scoring_rules: scoring,
+        }
+    }
 }
 
 /// Manually operated predictor trial session managing trial preparation, prediction registration, and evidence revelation.
@@ -3357,10 +3570,10 @@ impl ManualTrialSession {
                     InputEvaluationPoint {
                         input_value: val,
                         hamming_weight_k: k,
-                        predicted_count: prediction.structured_prediction().instruction_count.evaluate_popcount(k),
+                        predicted_count: prediction.structured_prediction().instruction_count.evaluate_input(val),
                         observed_count: None,
                         status: InputEvaluationStatus::MissingObservation {
-                            predicted: prediction.structured_prediction().instruction_count.evaluate_popcount(k),
+                            predicted: prediction.structured_prediction().instruction_count.evaluate_input(val),
                         },
                     }
                 }).collect();

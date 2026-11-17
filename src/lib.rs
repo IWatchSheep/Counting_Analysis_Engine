@@ -2494,4 +2494,181 @@ mod tests {
         assert_eq!(ev_c.test_inputs_evaluated, vec![0, 1, 5]);
     }
 
+    // --- CAE-1E Phase 6: First Registered Prediction Experiment Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_d_ctz_vectors() {
+        // x = 0: xor, test, jz [taken] -> 3 steps, RAX = 0, backedges = 0
+        let r0 = WindowsNativeDebugger::trace_kernel("exp-d", 0, 100)
+            .expect("Native trace of exp-d (0) should succeed");
+        assert_eq!(r0.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r0.total_observed_instructions, 3);
+        assert_eq!(r0.return_value_rax, 0);
+        assert_eq!(r0.count_backward_branches(), 0);
+
+        // x = 1 (t = 0): xor, test, jz [not taken], test, jnz [taken] -> 5 steps, RAX = 0, backedges = 0
+        let r1 = WindowsNativeDebugger::trace_kernel("exp-d", 1, 100)
+            .expect("Native trace of exp-d (1) should succeed");
+        assert_eq!(r1.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r1.total_observed_instructions, 5);
+        assert_eq!(r1.return_value_rax, 0);
+        assert_eq!(r1.count_backward_branches(), 0);
+
+        // x = 2 (t = 1): 5 + 7*1 = 12 steps, RAX = 1, backedges = 1
+        let r2 = WindowsNativeDebugger::trace_kernel("exp-d", 2, 100)
+            .expect("Native trace of exp-d (2) should succeed");
+        assert_eq!(r2.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r2.total_observed_instructions, 12);
+        assert_eq!(r2.return_value_rax, 1);
+        assert_eq!(r2.count_backward_branches(), 1);
+
+        // x = 8 (t = 3): 5 + 7*3 = 26 steps, RAX = 3, backedges = 3
+        let r8 = WindowsNativeDebugger::trace_kernel("exp-d", 8, 100)
+            .expect("Native trace of exp-d (8) should succeed");
+        assert_eq!(r8.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r8.total_observed_instructions, 26);
+        assert_eq!(r8.return_value_rax, 3);
+        assert_eq!(r8.count_backward_branches(), 3);
+
+        // x = 64 (t = 6): 5 + 7*6 = 47 steps, RAX = 6, backedges = 6
+        let r64 = WindowsNativeDebugger::trace_kernel("exp-d", 64, 100)
+            .expect("Native trace of exp-d (64) should succeed");
+        assert_eq!(r64.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r64.total_observed_instructions, 47);
+        assert_eq!(r64.return_value_rax, 6);
+        assert_eq!(r64.count_backward_branches(), 6);
+    }
+
+    #[test]
+    fn test_phase6_piecewise_ctz_hypothesis_and_serialization() {
+        let hyp = InstructionCountHypothesis::PiecewiseCTZ {
+            zero_input_case: 3,
+            zero_trailing_case: 5,
+            non_zero_intercept: 5,
+            non_zero_slope: 7,
+        };
+
+        assert_eq!(hyp.evaluate_input(0), Some(3));
+        assert_eq!(hyp.evaluate_input(1), Some(5));
+        assert_eq!(hyp.evaluate_input(2), Some(12));
+        assert_eq!(hyp.evaluate_input(8), Some(26));
+        assert_eq!(hyp.evaluate_input(64), Some(47));
+
+        let pred = PredictionRecord::populate_phase6_ctz_prediction(
+            "PRED-CTZ-001",
+            "Test-Predictor",
+            "2026-11-17T12:00:00Z",
+        );
+        let serialized = pred.to_durable_text();
+        assert!(serialized.contains("instruction_count=PiecewiseCTZ:3:5:5:7"));
+
+        let reloaded = PredictionRecord::from_durable_text(&serialized)
+            .expect("Durable text reload must succeed");
+        assert_eq!(reloaded.structured_prediction().instruction_count, hyp);
+        assert_eq!(reloaded.canonical_sha256(), pred.canonical_sha256());
+    }
+
+    #[test]
+    fn test_phase6_registered_prediction_experiment_full_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_phase6_trial_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        // 1. Prepare fresh machine-code task (CAE-1E-EXP-001)
+        let exp = ExperimentDefinition::populate_phase6_trial_experiment();
+        store.save_experiment(&exp).expect("Save experiment must succeed");
+
+        let prompt_packet = ManualTrialSession::prepare_trial(&exp, "2026-11-17T12:00:00Z");
+        assert!(prompt_packet.verify_integrity());
+        // Verify prompt withholds physical trace measurements
+        assert!(!prompt_packet.prompt_markdown_text.contains("trace_observed_counts"));
+        assert!(!prompt_packet.prompt_markdown_text.contains("trace_artifact_reference"));
+
+        // 2. Capture independent predictions before evidence disclosure
+        let correct_pred = PredictionRecord::populate_phase6_ctz_prediction(
+            "PRED-EXP-001-CORRECT",
+            "Expert-Disassembly-Analyst",
+            "2026-11-17T12:05:00Z",
+        );
+        let flawed_pred = PredictionRecord::populate_phase6_flawed_prediction(
+            "PRED-EXP-001-FLAWED",
+            "Flawed-Heuristic-Analyst",
+            "2026-11-17T12:06:00Z",
+        );
+
+        // 3. Freeze predictions BEFORE evidence disclosure
+        let frozen_correct = ManualTrialSession::register_prediction(
+            &store,
+            &prompt_packet,
+            correct_pred.prediction_id(),
+            correct_pred.model_identifier(),
+            correct_pred.original_response_text(),
+            correct_pred.structured_prediction().clone(),
+            correct_pred.registration_timestamp_iso8601(),
+        ).expect("Register correct prediction must succeed");
+        assert_eq!(frozen_correct.state(), PredictionState::Frozen);
+
+        let frozen_flawed = ManualTrialSession::register_prediction(
+            &store,
+            &prompt_packet,
+            flawed_pred.prediction_id(),
+            flawed_pred.model_identifier(),
+            flawed_pred.original_response_text(),
+            flawed_pred.structured_prediction().clone(),
+            flawed_pred.registration_timestamp_iso8601(),
+        ).expect("Register flawed prediction must succeed");
+        assert_eq!(frozen_flawed.state(), PredictionState::Frozen);
+
+        // 4. Reveal independently verified traces & validate executable identity
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let exe_sha256 = if debug_exe.exists() {
+            Some(compute_file_sha256(debug_exe).unwrap())
+        } else {
+            None
+        };
+        let ground_truth_evidence = NativeTraceEvidence::populate_phase6_trial_evidence(exe_sha256);
+
+        // 5. Score and preserve: Deterministic scoring via DeterministicPredictionEvaluator
+        let exec_correct = ManualTrialSession::disclose_and_evaluate(
+            &store,
+            &exp,
+            &frozen_correct,
+            Some(&ground_truth_evidence),
+            "EV-EXP-001-CORRECT",
+            "2026-11-17T12:15:00Z",
+            if debug_exe.exists() { Some(debug_exe) } else { None },
+        ).expect("Disclose and evaluate correct prediction must succeed");
+
+        assert_eq!(exec_correct.final_prediction_state, PredictionState::Archived);
+        assert!(exec_correct.post_archival_integrity_verified);
+        assert_eq!(exec_correct.evaluation_report.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+        assert_eq!(exec_correct.evaluation_report.backedge_status, BackedgeEvaluationStatus::ExactMatch);
+        for pt in &exec_correct.evaluation_report.evaluation_points {
+            assert!(matches!(pt.status, InputEvaluationStatus::ExactMatch));
+        }
+
+        // Flawed prediction evaluation
+        let exec_flawed = ManualTrialSession::disclose_and_evaluate(
+            &store,
+            &exp,
+            &frozen_flawed,
+            Some(&ground_truth_evidence),
+            "EV-EXP-001-FLAWED",
+            "2026-11-17T12:16:00Z",
+            if debug_exe.exists() { Some(debug_exe) } else { None },
+        ).expect("Disclose and evaluate flawed prediction must succeed");
+
+        assert_eq!(exec_flawed.final_prediction_state, PredictionState::Archived);
+        assert!(exec_flawed.post_archival_integrity_verified);
+        assert_eq!(exec_flawed.evaluation_report.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert!(matches!(exec_flawed.evaluation_report.backedge_status, BackedgeEvaluationStatus::Discrepancy { .. }));
+
+        // Check durability and history preservation
+        let stored_evs = store.list_evidence_for_prediction(correct_pred.prediction_id()).unwrap();
+        assert_eq!(stored_evs.len(), 1);
+        assert_eq!(stored_evs[0].scientific_verdict, ScientificVerdict::VerifiedPrediction);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 }
