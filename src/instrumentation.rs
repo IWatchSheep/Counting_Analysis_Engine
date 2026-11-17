@@ -5,15 +5,21 @@
 //!
 //! IMPORTANT: These counts represent source-language semantic operations (loop passes,
 //! variable increments, logical operators), NOT assembly instructions or CPU cycles.
-//! Assembly and hardware measurements are introduced in later checkpoints (CAE-1B, CAE-1C).
+//! Assembly inspection (Tier 2) and dynamic execution measurements (Tier 3) are
+//! handled by separate analysis modules.
 
 /// Explicit record of high-level source operations performed by an algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SourceOperationCounts {
     /// Number of times a loop body was entered and executed.
     pub loop_iterations: u64,
-    /// Number of explicit increment operations applied to the counter variable.
+    /// Number of explicit increment operations applied to a counter variable (e.g. `count += 1`).
     pub counter_updates: u64,
+    /// Number of opaque / intrinsic invocations that return a precomputed or hardware count (e.g. `count_ones()`).
+    ///
+    /// Distinct from `counter_updates`: an intrinsic invocation is a single closed-form call,
+    /// not an explicit loop iteration or step-by-step counter accumulation in source code.
+    pub opaque_invocations: u64,
     /// Number of bitwise AND (`&`) operations evaluated.
     pub bitwise_ands: u64,
     /// Number of bitwise right-shift (`>>`) operations executed.
@@ -29,6 +35,7 @@ impl SourceOperationCounts {
     pub fn total_operations(&self) -> u64 {
         self.loop_iterations
             + self.counter_updates
+            + self.opaque_invocations
             + self.bitwise_ands
             + self.bit_shifts
             + self.arithmetic_subtractions
@@ -94,13 +101,14 @@ pub fn popcount_kernighan_instrumented(mut n: u64) -> (u32, SourceOperationCount
 
 /// Instrumented execution of the optimized reference implementation (`count_ones()`).
 ///
-/// From the perspective of source-level evaluation, this is an opaque closed-form
-/// operation with no source loop iterations.
+/// Notice the clear architectural separation: `count_ones()` does NOT perform iterative
+/// `counter_updates` in source code. It executes as a single `opaque_invocations` operation.
 pub fn popcount_reference_instrumented(n: u64) -> (u32, SourceOperationCounts) {
     let count = n.count_ones();
     let ops = SourceOperationCounts {
         loop_iterations: 0,
-        counter_updates: 1, // Single direct assignment of the computed count
+        counter_updates: 0,
+        opaque_invocations: 1, // Single opaque intrinsic invocation
         bitwise_ands: 0,
         bit_shifts: 0,
         arithmetic_subtractions: 0,

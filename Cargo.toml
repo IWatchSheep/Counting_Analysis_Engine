@@ -12,3 +12,4 @@ name = "Counting_Analysis_Engine"
 path = "src/main.rs"
 
 [dependencies]
+iced-x86 = "1.22.0"

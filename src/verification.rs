@@ -2,8 +2,27 @@
 //!
 //! Provides deterministic, reproducible test vectors and independent verification oracles
 //! to guarantee that all population-counting implementations produce bit-for-bit identical results.
+//!
+//! ## Architectural Note: Verification Rigor vs. Mathematical Proof
+//! - **Empirical Verification** tests sampled finite inputs (standard vectors + pseudorandom fuzzing).
+//!   While it provides high empirical confidence, it does NOT constitute a formal mathematical proof
+//!   across the entire $2^{64}$ state space.
+//! - **Exhaustive Bounded Domain Verification** tests 100% of all possible inputs within a bounded
+//!   state space (e.g., all 65,536 possible 16-bit values), providing a complete mathematical proof
+//!   for that sub-domain.
 
 use crate::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
+
+/// Distinct tiers of verification rigor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationRigor {
+    /// High-confidence empirical verification over finite sampled test vectors.
+    EmpiricalSampled { sample_count: usize },
+    /// Exhaustive proof across all possible inputs in a bounded domain (e.g. 16-bit space).
+    ExhaustiveBoundedDomain { bit_width: u8, total_states: u64 },
+    /// Formal mathematical proof or translation validation (e.g. via symbolic solver or SMT).
+    FormalProof { proof_system: &'static str },
+}
 
 /// Deterministic 64-bit XorShift pseudorandom generator.
 ///
@@ -147,4 +166,25 @@ pub fn verify_input(n: u64) -> VerificationResult {
         oracle_result: oracle,
         all_agree,
     }
+}
+
+/// Exhaustively verify equivalence across all 65,536 possible 16-bit values.
+///
+/// Because every single state in `0..=65,535` is checked, this constitutes a
+/// true exhaustive mathematical proof of equivalence for the 16-bit sub-domain.
+pub fn verify_exhaustive_16bit_subdomain() -> (bool, u64) {
+    let mut total_checked = 0u64;
+    for val in 0..=u16::MAX {
+        let n = val as u64;
+        let naive = popcount_naive(n);
+        let kernighan = popcount_kernighan(n);
+        let reference = popcount_reference(n);
+        let oracle = independent_string_oracle(n);
+
+        if !(naive == kernighan && kernighan == reference && reference == oracle) {
+            return (false, total_checked);
+        }
+        total_checked += 1;
+    }
+    (true, total_checked)
 }
