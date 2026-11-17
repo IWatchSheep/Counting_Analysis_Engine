@@ -421,8 +421,15 @@ fn main() {
     println!("   - High-level Rust function return values represent language-level ABI outputs, not explicit hardware registers.");
     println!("   - For micro-kernels, CAE now extracts true physical CPU registers (RAX, RSP, RFLAGS) via `core::arch::asm!`.");
     println!("   - For independent execution path verification, CAE-1D Phase 2 employs the Windows Debug API");
-    println!("     (`DEBUG_ONLY_THIS_PROCESS`) with CPU Trap Flag (`TF=0x100`) single-stepping in a separate child process,\n");
+    println!("     (`DEBUG_ONLY_THIS_PROCESS`) with CPU Trap Flag (`TF=0x100`) single-stepping in a separate child process,");
     println!("     completely avoiding in-process VEH hooks and thread debugger conflicts.\n");
+    println!("3. Scope of Native Hardware Tracing (Micro-Kernels vs. Arbitrary Compiled Programs):");
+    println!("   - The native tracer has been demonstrated strictly on controlled, self-contained micro-kernels");
+    println!("     with explicit software breakpoint (`int 3`) entry and exit delimiters.");
+    println!("   - SCIENTIFIC LIMITATION: This breakpoint and function-boundary strategy is tailored for controlled");
+    println!("     micro-experiments with known start and end delimiters. It must NOT be generalized to arbitrary");
+    println!("     compiled programs, which involve compiler prologue/epilogue frames, indirect calls, external CRT/runtime");
+    println!("     helpers, dynamic link libraries, and complex multi-threaded scheduling.\n");
 
     println!("================================================================================");
     println!("CAE-1D Phase 2 Milestone Execution Complete. Ready for technical audit.");

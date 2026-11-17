@@ -576,12 +576,12 @@ mod tests {
     #[test]
     fn test_interpretation_archive_cae1d_entries() {
         let archive = InterpretationArchive::populate_cae1d_findings();
-        assert_eq!(archive.entries.len(), 9);
+        assert_eq!(archive.entries.len(), 10);
 
         let unresolved = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::UnresolvedHypothesis { .. })).count();
         let false_pos = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::FalsePositiveAvoided { .. })).count();
 
-        assert_eq!(unresolved, 1, "Expected 1 UnresolvedHypothesis for intermediate state bisimulation");
+        assert_eq!(unresolved, 2, "Expected 2 UnresolvedHypothesis (intermediate state bisimulation and arbitrary program generalization)");
         assert_eq!(false_pos, 3, "Expected 3 FalsePositiveAvoided (synthetic pointer stride, hardware register capture, and in-process VEH)");
     }
 

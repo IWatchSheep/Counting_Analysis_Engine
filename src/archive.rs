@@ -339,6 +339,17 @@ impl InterpretationArchive {
             },
             lesson: "Hardware Trap Flag single-stepping must execute within an isolated child process under DEBUG_ONLY_THIS_PROCESS to prevent corrupting host IDE debuggers or CAE analysis runtime.".to_string(),
         });
+
+        self.record(InterpretationArchiveEntry {
+            experiment_id: "CAE-1D-004".to_string(),
+            inspected_symbol: "native_tracer_generalization_boundary".to_string(),
+            assembly_pattern: "Explicit INT3 Delimited Micro-Kernels vs Arbitrary Compiled Functions".to_string(),
+            analyzer_hypothesis: "Micro-kernel single-step breakpoint strategy can be directly generalized to arbitrary compiled programs".to_string(),
+            verdict: InterpretationVerdict::UnresolvedHypothesis {
+                explanation: "Arbitrary programs contain compiler runtime helpers, dynamic DLL imports, and complex control flow that exceed static INT3 delimiters".to_string(),
+            },
+            lesson: "The native debugger's current INT3 delimiter strategy is strictly verified for controlled micro-kernels. Generalizing to arbitrary compiled functions requires runtime unwinding, dynamic symbol relocation, and thread filtering.".to_string(),
+        });
     }
 
     /// Render human-readable Markdown table of the interpretation archive.
