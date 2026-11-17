@@ -3,4 +3,12 @@ name = "Counting_Analysis_Engine"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "Counting_Analysis_Engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Counting_Analysis_Engine"
+path = "src/main.rs"
+
 [dependencies]
