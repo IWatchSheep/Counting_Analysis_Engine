@@ -298,6 +298,38 @@ impl InterpretationArchive {
         archive
     }
 
+    /// Returns the interpretation archive populated with CAE-1B and CAE-1D tracing/emulation findings.
+    pub fn populate_cae1d_findings() -> Self {
+        let mut archive = Self::populate_cae1b_findings();
+        archive.extend_with_cae1d();
+        archive
+    }
+
+    /// Extends the archive with deductions and scientific limitations identified during CAE-1D.
+    pub fn extend_with_cae1d(&mut self) {
+        self.record(InterpretationArchiveEntry {
+            experiment_id: "CAE-1D-001".to_string(),
+            inspected_symbol: "popcount_differential_tests".to_string(),
+            assembly_pattern: "Black-Box Dual-Execution Differential Oracle".to_string(),
+            analyzer_hypothesis: "Matching final return value proves identical intermediate execution semantics".to_string(),
+            verdict: InterpretationVerdict::UnresolvedHypothesis {
+                explanation: "Output equivalence proves functional I/O equivalence, but full intermediate register/flag/memory bisimulation requires step-by-step state comparison".to_string(),
+            },
+            lesson: "Matching final return values is necessary for functional equivalence, but does not prove intermediate flags, unread registers, or memory spills are identical. True architectural equivalence requires intermediate state bisimulation or reference emulator comparison.".to_string(),
+        });
+
+        self.record(InterpretationArchiveEntry {
+            experiment_id: "CAE-1D-002".to_string(),
+            inspected_symbol: "native_hardware_register_capture".to_string(),
+            assembly_pattern: "core::arch::asm! with pushfq/pop {flags} and explicit out('rax')".to_string(),
+            analyzer_hypothesis: "High-level Rust function return values represent physical machine register state".to_string(),
+            verdict: InterpretationVerdict::FalsePositiveAvoided {
+                reason: "Rust ABI return values convey functional integer results; physical registers (RAX, RSP, RFLAGS) must be captured via hardware asm or debugger API".to_string(),
+            },
+            lesson: "To verify physical silicon state, CAE must explicitly extract hardware registers and RFLAGS via inline assembly or CONTEXT structures rather than relying on high-level function return values.".to_string(),
+        });
+    }
+
     /// Render human-readable Markdown table of the interpretation archive.
     pub fn render_markdown_table(&self) -> String {
         let mut out = String::new();

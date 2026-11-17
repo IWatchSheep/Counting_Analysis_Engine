@@ -71,6 +71,37 @@ pub struct EmulatedTraceStep {
     pub operands_str: String,
     pub bytes: Vec<u8>,
     pub registers_after: CpuRegisters,
+    pub flags_after: CpuFlags,
+}
+
+/// Physical hardware machine state captured directly from the host CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeHardwareState {
+    pub rax: u64,
+    pub rsp_before: u64,
+    pub rsp_after: u64,
+    pub rsp_delta: i64,
+    pub rflags: u64,
+    pub zf: bool,
+    pub sf: bool,
+    pub cf: bool,
+    pub of: bool,
+}
+
+impl NativeHardwareState {
+    pub fn from_raw(rax: u64, rsp_before: u64, rsp_after: u64, rflags: u64) -> Self {
+        Self {
+            rax,
+            rsp_before,
+            rsp_after,
+            rsp_delta: rsp_after as i64 - rsp_before as i64,
+            rflags,
+            cf: (rflags & (1 << 0)) != 0,
+            zf: (rflags & (1 << 6)) != 0,
+            sf: (rflags & (1 << 7)) != 0,
+            of: (rflags & (1 << 11)) != 0,
+        }
+    }
 }
 
 /// Status of an emulation experiment.
@@ -93,6 +124,8 @@ pub struct TraceExperimentReport {
     pub steps: Vec<EmulatedTraceStep>,
     pub instruction_count: usize,
     pub return_value: u64,
+    pub final_registers: CpuRegisters,
+    pub final_flags: CpuFlags,
     pub termination_reason: TerminationReason,
     pub status: EmulationStatus,
 }
@@ -525,6 +558,7 @@ impl X64MicroEmulator {
                 operands_str,
                 bytes: instr_bytes,
                 registers_after: self.regs,
+                flags_after: self.flags,
             });
 
             match step_result {
@@ -553,6 +587,8 @@ impl X64MicroEmulator {
             steps,
             instruction_count: self.steps_taken,
             return_value: self.regs.rax,
+            final_registers: self.regs,
+            final_flags: self.flags,
             termination_reason,
             status,
         }
@@ -629,15 +665,17 @@ impl X64MicroEmulator {
             Mnemonic::Add => {
                 let op0 = self.read_op_value(instr, 0)?;
                 let op1 = self.read_op_value(instr, 1)?;
-                let (res, cf) = if is_64bit {
+                let (res, cf, of) = if is_64bit {
                     let (r, c) = op0.overflowing_add(op1);
-                    (r, c)
+                    let (_, o) = (op0 as i64).overflowing_add(op1 as i64);
+                    (r, c, o)
                 } else {
                     let (r, c) = (op0 as u32).overflowing_add(op1 as u32);
-                    (r as u64, c)
+                    let (_, o) = (op0 as i32).overflowing_add(op1 as i32);
+                    (r as u64, c, o)
                 };
                 self.write_op_value(instr, 0, res)?;
-                self.update_arith_flags(res, is_64bit, cf, false);
+                self.update_arith_flags(res, is_64bit, cf, of);
                 Ok(true)
             }
 
@@ -663,31 +701,49 @@ impl X64MicroEmulator {
             Mnemonic::Sub => {
                 let op0 = self.read_op_value(instr, 0)?;
                 let op1 = self.read_op_value(instr, 1)?;
-                let (res, cf) = if is_64bit {
+                let (res, cf, of) = if is_64bit {
                     let (r, c) = op0.overflowing_sub(op1);
-                    (r, c)
+                    let (_, o) = (op0 as i64).overflowing_sub(op1 as i64);
+                    (r, c, o)
                 } else {
                     let (r, c) = (op0 as u32).overflowing_sub(op1 as u32);
-                    (r as u64, c)
+                    let (_, o) = (op0 as i32).overflowing_sub(op1 as i32);
+                    (r as u64, c, o)
                 };
                 self.write_op_value(instr, 0, res)?;
-                self.update_arith_flags(res, is_64bit, cf, false);
+                self.update_arith_flags(res, is_64bit, cf, of);
                 Ok(true)
             }
 
             Mnemonic::Inc => {
                 let op0 = self.read_op_value(instr, 0)?;
-                let res = if is_64bit { op0.wrapping_add(1) } else { (op0 as u32).wrapping_add(1) as u64 };
+                let (res, of) = if is_64bit {
+                    let r = op0.wrapping_add(1);
+                    let (_, o) = (op0 as i64).overflowing_add(1);
+                    (r, o)
+                } else {
+                    let r = (op0 as u32).wrapping_add(1) as u64;
+                    let (_, o) = (op0 as i32).overflowing_add(1);
+                    (r, o)
+                };
                 self.write_op_value(instr, 0, res)?;
-                self.update_arith_flags(res, is_64bit, self.flags.cf, false);
+                self.update_arith_flags(res, is_64bit, self.flags.cf, of);
                 Ok(true)
             }
 
             Mnemonic::Dec => {
                 let op0 = self.read_op_value(instr, 0)?;
-                let res = if is_64bit { op0.wrapping_sub(1) } else { (op0 as u32).wrapping_sub(1) as u64 };
+                let (res, of) = if is_64bit {
+                    let r = op0.wrapping_sub(1);
+                    let (_, o) = (op0 as i64).overflowing_sub(1);
+                    (r, o)
+                } else {
+                    let r = (op0 as u32).wrapping_sub(1) as u64;
+                    let (_, o) = (op0 as i32).overflowing_sub(1);
+                    (r, o)
+                };
                 self.write_op_value(instr, 0, res)?;
-                self.update_arith_flags(res, is_64bit, self.flags.cf, false);
+                self.update_arith_flags(res, is_64bit, self.flags.cf, of);
                 Ok(true)
             }
 
@@ -730,23 +786,35 @@ impl X64MicroEmulator {
             Mnemonic::Shl => {
                 let op0 = self.read_op_value(instr, 0)?;
                 let shift = (self.read_op_value(instr, 1)? & 0x3F) as u32;
-                let res = op0 << shift;
+                let res = if shift >= 64 { 0 } else { op0 << shift };
+                let cf = if shift > 0 {
+                    let total_bits = if is_64bit { 64 } else { 32 };
+                    if shift <= total_bits {
+                        ((op0 >> (total_bits - shift)) & 1) != 0
+                    } else {
+                        false
+                    }
+                } else {
+                    self.flags.cf
+                };
                 self.write_op_value(instr, 0, res)?;
-                self.update_arith_flags(res, is_64bit, false, false);
+                self.update_arith_flags(res, is_64bit, cf, false);
                 Ok(true)
             }
 
             Mnemonic::Cmp => {
                 let op0 = self.read_op_value(instr, 0)?;
                 let op1 = self.read_op_value(instr, 1)?;
-                let (res, cf) = if is_64bit {
+                let (res, cf, of) = if is_64bit {
                     let (r, c) = op0.overflowing_sub(op1);
-                    (r, c)
+                    let (_, o) = (op0 as i64).overflowing_sub(op1 as i64);
+                    (r, c, o)
                 } else {
                     let (r, c) = (op0 as u32).overflowing_sub(op1 as u32);
-                    (r as u64, c)
+                    let (_, o) = (op0 as i32).overflowing_sub(op1 as i32);
+                    (r as u64, c, o)
                 };
-                self.update_arith_flags(res, is_64bit, cf, false);
+                self.update_arith_flags(res, is_64bit, cf, of);
                 Ok(true)
             }
 
@@ -953,6 +1021,191 @@ impl MicroExperiments {
     pub fn run_experiment_c(iterations: u64) -> TraceExperimentReport {
         let mut emu = X64MicroEmulator::new(Self::CODE_EXP_C_LOOP, iterations, 0, 1_000);
         emu.run_trace("EXP-C", "Bounded Loop Counter", iterations)
+    }
+
+    /// Standalone bytecode sequence for 64-bit ADD (`add rax, rdx; ret`).
+    #[rustfmt::skip]
+    pub const CODE_STANDALONE_ADD: &'static [u8] = &[
+        0x48, 0x89, 0xC8,       // mov rax, rcx
+        0x48, 0x01, 0xD0,       // add rax, rdx
+        0xC3,                   // ret
+    ];
+
+    /// Standalone bytecode sequence for 64-bit SUB (`sub rax, rdx; ret`).
+    #[rustfmt::skip]
+    pub const CODE_STANDALONE_SUB: &'static [u8] = &[
+        0x48, 0x89, 0xC8,       // mov rax, rcx
+        0x48, 0x29, 0xD0,       // sub rax, rdx
+        0xC3,                   // ret
+    ];
+
+    /// Runs dynamic emulation of 64-bit ADD.
+    pub fn run_dynamic_add(a: u64, b: u64) -> TraceExperimentReport {
+        let mut emu = X64MicroEmulator::new(Self::CODE_STANDALONE_ADD, a, b, 10);
+        emu.run_trace("ARITH-ADD", "64-bit ADD Flag Test", a)
+    }
+
+    /// Runs dynamic emulation of 64-bit SUB.
+    pub fn run_dynamic_sub(a: u64, b: u64) -> TraceExperimentReport {
+        let mut emu = X64MicroEmulator::new(Self::CODE_STANDALONE_SUB, a, b, 10);
+        emu.run_trace("ARITH-SUB", "64-bit SUB Flag Test", a)
+    }
+
+    /// Executes Experiment A directly on native physical host CPU hardware and captures
+    /// the true machine registers and RFLAGS via inline assembly (`core::arch::asm!`).
+    ///
+    /// # Safety
+    /// Executes inline x86-64 assembly instructions directly on the host CPU.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn execute_native_hardware_exp_a(input: u64) -> NativeHardwareState {
+        let rax_out: u64;
+        let rsp_before: u64;
+        let rsp_after: u64;
+        let rflags_out: u64;
+        unsafe {
+            std::arch::asm!(
+                "mov {rsp_init}, rsp",
+                "mov rax, rcx",
+                "add rax, 10",
+                "shl rax, 1",
+                "pushfq",
+                "pop {flags}",
+                "mov {rsp_final}, rsp",
+                in("rcx") input,
+                out("rax") rax_out,
+                flags = out(reg) rflags_out,
+                rsp_init = out(reg) rsp_before,
+                rsp_final = out(reg) rsp_after,
+            );
+        }
+        NativeHardwareState::from_raw(rax_out, rsp_before, rsp_after, rflags_out)
+    }
+
+    /// Executes Experiment B directly on native physical host CPU hardware and captures
+    /// the true machine registers and RFLAGS via inline assembly (`core::arch::asm!`).
+    ///
+    /// # Safety
+    /// Executes inline x86-64 assembly instructions directly on the host CPU.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn execute_native_hardware_exp_b(input: u64) -> NativeHardwareState {
+        let rax_out: u64;
+        let rsp_before: u64;
+        let rsp_after: u64;
+        let rflags_out: u64;
+        unsafe {
+            std::arch::asm!(
+                "mov {rsp_init}, rsp",
+                "test rcx, 1",
+                "jnz 2f",
+                "mov eax, 100",
+                "jmp 3f",
+                "2:",
+                "mov eax, 200",
+                "3:",
+                "pushfq",
+                "pop {flags}",
+                "mov {rsp_final}, rsp",
+                in("rcx") input,
+                out("rax") rax_out,
+                flags = out(reg) rflags_out,
+                rsp_init = out(reg) rsp_before,
+                rsp_final = out(reg) rsp_after,
+            );
+        }
+        NativeHardwareState::from_raw(rax_out, rsp_before, rsp_after, rflags_out)
+    }
+
+    /// Executes Experiment C directly on native physical host CPU hardware and captures
+    /// the true machine registers and RFLAGS via inline assembly (`core::arch::asm!`).
+    ///
+    /// # Safety
+    /// Executes inline x86-64 assembly instructions directly on the host CPU.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn execute_native_hardware_exp_c(n: u64) -> NativeHardwareState {
+        let rax_out: u64;
+        let rsp_before: u64;
+        let rsp_after: u64;
+        let rflags_out: u64;
+        unsafe {
+            std::arch::asm!(
+                "mov {rsp_init}, rsp",
+                "xor eax, eax",
+                "4:",
+                "test rcx, rcx",
+                "jz 5f",
+                "add rax, rcx",
+                "dec rcx",
+                "jmp 4b",
+                "5:",
+                "pushfq",
+                "pop {flags}",
+                "mov {rsp_final}, rsp",
+                inout("rcx") n => _,
+                out("rax") rax_out,
+                flags = out(reg) rflags_out,
+                rsp_init = out(reg) rsp_before,
+                rsp_final = out(reg) rsp_after,
+            );
+        }
+        NativeHardwareState::from_raw(rax_out, rsp_before, rsp_after, rflags_out)
+    }
+
+    /// Executes 64-bit ADD on native physical silicon and captures registers and flags.
+    ///
+    /// # Safety
+    /// Executes inline x86-64 assembly instructions directly on the host CPU.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn execute_native_add(a: u64, b: u64) -> NativeHardwareState {
+        let rax_out: u64;
+        let rsp_before: u64;
+        let rsp_after: u64;
+        let rflags_out: u64;
+        unsafe {
+            std::arch::asm!(
+                "mov {rsp_init}, rsp",
+                "mov rax, rcx",
+                "add rax, rdx",
+                "pushfq",
+                "pop {flags}",
+                "mov {rsp_final}, rsp",
+                in("rcx") a,
+                in("rdx") b,
+                out("rax") rax_out,
+                flags = out(reg) rflags_out,
+                rsp_init = out(reg) rsp_before,
+                rsp_final = out(reg) rsp_after,
+            );
+        }
+        NativeHardwareState::from_raw(rax_out, rsp_before, rsp_after, rflags_out)
+    }
+
+    /// Executes 64-bit SUB on native physical silicon and captures registers and flags.
+    ///
+    /// # Safety
+    /// Executes inline x86-64 assembly instructions directly on the host CPU.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn execute_native_sub(a: u64, b: u64) -> NativeHardwareState {
+        let rax_out: u64;
+        let rsp_before: u64;
+        let rsp_after: u64;
+        let rflags_out: u64;
+        unsafe {
+            std::arch::asm!(
+                "mov {rsp_init}, rsp",
+                "mov rax, rcx",
+                "sub rax, rdx",
+                "pushfq",
+                "pop {flags}",
+                "mov {rsp_final}, rsp",
+                in("rcx") a,
+                in("rdx") b,
+                out("rax") rax_out,
+                flags = out(reg) rflags_out,
+                rsp_init = out(reg) rsp_before,
+                rsp_final = out(reg) rsp_after,
+            );
+        }
+        NativeHardwareState::from_raw(rax_out, rsp_before, rsp_after, rflags_out)
     }
 }
 

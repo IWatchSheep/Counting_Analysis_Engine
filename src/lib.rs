@@ -385,6 +385,13 @@ mod tests {
         }
     }
 
+    /// Black-Box Functional Differential Test (Rust ABI Return Value).
+    ///
+    /// SCIENTIFIC LIMITATION NOTE:
+    /// Matching final return values proves functional input-output equivalence according to the
+    /// compiler calling convention (RAX return value), but does NOT prove that every intermediate
+    /// machine register, condition flag, stack spill, or unread operand was identically reproduced.
+    /// Full architectural equivalence requires intermediate state bisimulation or hardware single-stepping.
     #[test]
     fn test_emulation_differential_oracle_comparison() {
         let test_cases = [
@@ -429,5 +436,154 @@ mod tests {
             eprintln!("Differential Match on {}: native={}, emu_kern_steps={}, emu_ref_steps={}",
                 name, native_kern, emu_kern.instruction_count, emu_ref.instruction_count);
         }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_emulation_hardware_native_state_differential() {
+        // 1. Experiment A: Straight-line execution
+        let native_a = unsafe { MicroExperiments::execute_native_hardware_exp_a(42) };
+        let emu_a = MicroExperiments::run_experiment_a(42);
+
+        assert_eq!(emu_a.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(emu_a.final_registers.rax, native_a.rax, "RAX mismatch on Exp A");
+        assert_eq!(emu_a.final_flags.zf, native_a.zf, "ZF flag mismatch on Exp A");
+        assert_eq!(emu_a.final_flags.cf, native_a.cf, "CF flag mismatch on Exp A");
+        assert_eq!(emu_a.final_flags.sf, native_a.sf, "SF flag mismatch on Exp A");
+        // Verify native stack balance independently:
+        assert_eq!(native_a.rsp_delta, 0, "Native host stack must be perfectly balanced across the asm block");
+        // Verify virtual emulator stack frame balance independently:
+        // Entry top_rsp = initial_rsp - 8; RET pops sentinel -> delta = +8.
+        let emu_rsp_delta = emu_a.final_registers.rsp as i64 - emu_a.initial_registers.rsp as i64;
+        assert_eq!(emu_rsp_delta, 8, "Emulator stack pointer delta must be exactly +8 bytes (sentinel RET popped)");
+
+        // 2. Experiment B: Conditional Branching (Even input -> Not-Taken branch)
+        let native_b_even = unsafe { MicroExperiments::execute_native_hardware_exp_b(10) };
+        let emu_b_even = MicroExperiments::run_experiment_b(10);
+
+        assert_eq!(emu_b_even.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(emu_b_even.final_registers.rax, native_b_even.rax, "RAX mismatch on Exp B (even)");
+        assert_eq!(emu_b_even.final_flags.zf, native_b_even.zf, "ZF flag mismatch on Exp B (even)");
+        assert_eq!(native_b_even.rsp_delta, 0);
+
+        // 3. Experiment B: Conditional Branching (Odd input -> Taken branch)
+        let native_b_odd = unsafe { MicroExperiments::execute_native_hardware_exp_b(11) };
+        let emu_b_odd = MicroExperiments::run_experiment_b(11);
+
+        assert_eq!(emu_b_odd.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(emu_b_odd.final_registers.rax, native_b_odd.rax, "RAX mismatch on Exp B (odd)");
+        assert_eq!(emu_b_odd.final_flags.zf, native_b_odd.zf, "ZF flag mismatch on Exp B (odd)");
+        assert_eq!(native_b_odd.rsp_delta, 0);
+
+        // 4. Experiment C: Bounded Loop (n = 5)
+        let native_c_5 = unsafe { MicroExperiments::execute_native_hardware_exp_c(5) };
+        let emu_c_5 = MicroExperiments::run_experiment_c(5);
+
+        assert_eq!(emu_c_5.status, EmulationStatus::CompletedSuccess);
+        assert_eq!(emu_c_5.final_registers.rax, native_c_5.rax, "RAX mismatch on Exp C (n=5)");
+        assert_eq!(emu_c_5.final_flags.zf, native_c_5.zf, "ZF flag mismatch on Exp C (n=5)");
+        assert_eq!(native_c_5.rsp_delta, 0);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_condition_flags_arithmetic_boundaries_zf_cf_sf_of() {
+        // Case 1: Zero Flag (ZF=true, CF=false, SF=false, OF=false)
+        let nat_zero = unsafe { MicroExperiments::execute_native_sub(42, 42) };
+        let emu_zero = MicroExperiments::run_dynamic_sub(42, 42);
+        assert_eq!(nat_zero.rsp_delta, 0);
+        assert_eq!(emu_zero.final_registers.rax, nat_zero.rax);
+        assert_eq!(emu_zero.final_flags.zf, true);
+        assert_eq!(nat_zero.zf, true);
+        assert_eq!(emu_zero.final_flags.cf, false);
+        assert_eq!(nat_zero.cf, false);
+        assert_eq!(emu_zero.final_flags.sf, false);
+        assert_eq!(nat_zero.sf, false);
+        assert_eq!(emu_zero.final_flags.of, false);
+        assert_eq!(nat_zero.of, false);
+
+        // Case 2: Carry Flag on Subtraction Borrow (CF=true, SF=true, ZF=false, OF=false)
+        let nat_borrow = unsafe { MicroExperiments::execute_native_sub(0, 1) };
+        let emu_borrow = MicroExperiments::run_dynamic_sub(0, 1);
+        assert_eq!(nat_borrow.rsp_delta, 0);
+        assert_eq!(emu_borrow.final_registers.rax, nat_borrow.rax);
+        assert_eq!(emu_borrow.final_flags.cf, true);
+        assert_eq!(nat_borrow.cf, true);
+        assert_eq!(emu_borrow.final_flags.sf, true);
+        assert_eq!(nat_borrow.sf, true);
+        assert_eq!(emu_borrow.final_flags.zf, false);
+        assert_eq!(nat_borrow.zf, false);
+        assert_eq!(emu_borrow.final_flags.of, false);
+        assert_eq!(nat_borrow.of, false);
+
+        // Case 3: Carry Flag on Unsigned Overflow (CF=true, ZF=true, SF=false, OF=false)
+        let nat_uoverflow = unsafe { MicroExperiments::execute_native_add(u64::MAX, 1) };
+        let emu_uoverflow = MicroExperiments::run_dynamic_add(u64::MAX, 1);
+        assert_eq!(nat_uoverflow.rsp_delta, 0);
+        assert_eq!(emu_uoverflow.final_registers.rax, nat_uoverflow.rax);
+        assert_eq!(emu_uoverflow.final_flags.cf, true);
+        assert_eq!(nat_uoverflow.cf, true);
+        assert_eq!(emu_uoverflow.final_flags.zf, true);
+        assert_eq!(nat_uoverflow.zf, true);
+        assert_eq!(emu_uoverflow.final_flags.sf, false);
+        assert_eq!(nat_uoverflow.sf, false);
+        assert_eq!(emu_uoverflow.final_flags.of, false);
+        assert_eq!(nat_uoverflow.of, false);
+
+        // Case 4: Sign Flag on Negative Subtraction (SF=true, CF=true, ZF=false, OF=false)
+        let nat_sign = unsafe { MicroExperiments::execute_native_sub(10, 20) };
+        let emu_sign = MicroExperiments::run_dynamic_sub(10, 20);
+        assert_eq!(nat_sign.rsp_delta, 0);
+        assert_eq!(emu_sign.final_registers.rax, nat_sign.rax);
+        assert_eq!(emu_sign.final_flags.sf, true);
+        assert_eq!(nat_sign.sf, true);
+        assert_eq!(emu_sign.final_flags.cf, true);
+        assert_eq!(nat_sign.cf, true);
+        assert_eq!(emu_sign.final_flags.zf, false);
+        assert_eq!(nat_sign.zf, false);
+        assert_eq!(emu_sign.final_flags.of, false);
+        assert_eq!(nat_sign.of, false);
+
+        // Case 5: Signed Overflow Flag on Positive Addition (OF=true, SF=true, ZF=false, CF=false)
+        let max_i64_as_u64 = i64::MAX as u64; // 0x7FFF_FFFF_FFFF_FFFF
+        let nat_soverflow_add = unsafe { MicroExperiments::execute_native_add(max_i64_as_u64, 1) };
+        let emu_soverflow_add = MicroExperiments::run_dynamic_add(max_i64_as_u64, 1);
+        assert_eq!(nat_soverflow_add.rsp_delta, 0);
+        assert_eq!(emu_soverflow_add.final_registers.rax, nat_soverflow_add.rax);
+        assert_eq!(emu_soverflow_add.final_flags.of, true);
+        assert_eq!(nat_soverflow_add.of, true);
+        assert_eq!(emu_soverflow_add.final_flags.sf, true);
+        assert_eq!(nat_soverflow_add.sf, true);
+        assert_eq!(emu_soverflow_add.final_flags.zf, false);
+        assert_eq!(nat_soverflow_add.zf, false);
+        assert_eq!(emu_soverflow_add.final_flags.cf, false);
+        assert_eq!(nat_soverflow_add.cf, false);
+
+        // Case 6: Signed Overflow Flag on Negative Subtraction (OF=true, CF=false, SF=false, ZF=false)
+        let min_i64_as_u64 = i64::MIN as u64; // 0x8000_0000_0000_0000
+        let nat_soverflow_sub = unsafe { MicroExperiments::execute_native_sub(min_i64_as_u64, 1) };
+        let emu_soverflow_sub = MicroExperiments::run_dynamic_sub(min_i64_as_u64, 1);
+        assert_eq!(nat_soverflow_sub.rsp_delta, 0);
+        assert_eq!(emu_soverflow_sub.final_registers.rax, nat_soverflow_sub.rax);
+        assert_eq!(emu_soverflow_sub.final_flags.of, true);
+        assert_eq!(nat_soverflow_sub.of, true);
+        assert_eq!(emu_soverflow_sub.final_flags.cf, false);
+        assert_eq!(nat_soverflow_sub.cf, false);
+        assert_eq!(emu_soverflow_sub.final_flags.sf, false);
+        assert_eq!(nat_soverflow_sub.sf, false);
+        assert_eq!(emu_soverflow_sub.final_flags.zf, false);
+        assert_eq!(nat_soverflow_sub.zf, false);
+    }
+
+    #[test]
+    fn test_interpretation_archive_cae1d_entries() {
+        let archive = InterpretationArchive::populate_cae1d_findings();
+        assert_eq!(archive.entries.len(), 8);
+
+        let unresolved = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::UnresolvedHypothesis { .. })).count();
+        let false_pos = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::FalsePositiveAvoided { .. })).count();
+
+        assert_eq!(unresolved, 1, "Expected 1 UnresolvedHypothesis for intermediate state bisimulation");
+        assert_eq!(false_pos, 2, "Expected 2 FalsePositiveAvoided (synthetic pointer stride and hardware register capture)");
     }
 }
