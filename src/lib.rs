@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(clippy::bool_assert_comparison)]
 //! # Counting Analysis Engine (CAE)
 //!
 //! A framework to investigate what programs are counting, how they count,
@@ -9,6 +10,7 @@ pub mod archive;
 pub mod dynamic_analysis;
 pub mod emulation;
 pub mod instrumentation;
+pub mod native_trace;
 pub mod report;
 pub mod static_analysis;
 pub mod verification;
@@ -20,6 +22,7 @@ mod tests {
     use super::dynamic_analysis::*;
     use super::emulation::*;
     use super::instrumentation::*;
+    use super::native_trace::*;
     use super::static_analysis::*;
     use super::verification::*;
 
@@ -195,14 +198,9 @@ mod tests {
     fn test_optimization_archive_integrity() {
         let opt_archive = OptimizationArchive::populate_cae1c_findings();
         assert_eq!(opt_archive.entries.len(), 4);
-
-        let accepted = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Accepted { .. }));
-        let cond_accepted = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::ConditionallyAccepted { .. }));
-        let rejected = opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Rejected { .. }));
-
-        assert!(accepted, "Archive must contain accepted optimizations");
-        assert!(cond_accepted, "Archive must contain conditionally accepted optimizations");
-        assert!(rejected, "Archive must contain rejected optimizations");
+        assert!(opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Accepted { .. })));
+        assert!(opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::ConditionallyAccepted { .. })));
+        assert!(opt_archive.entries.iter().any(|e| matches!(e.verdict, OptimizationVerdict::Rejected { .. })));
     }
 
     // --- CAE-1D Phase 1: Machine-Code Emulation & Tracing Tests ---
@@ -578,12 +576,113 @@ mod tests {
     #[test]
     fn test_interpretation_archive_cae1d_entries() {
         let archive = InterpretationArchive::populate_cae1d_findings();
-        assert_eq!(archive.entries.len(), 8);
+        assert_eq!(archive.entries.len(), 9);
 
         let unresolved = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::UnresolvedHypothesis { .. })).count();
         let false_pos = archive.entries.iter().filter(|e| matches!(e.verdict, InterpretationVerdict::FalsePositiveAvoided { .. })).count();
 
         assert_eq!(unresolved, 1, "Expected 1 UnresolvedHypothesis for intermediate state bisimulation");
-        assert_eq!(false_pos, 2, "Expected 2 FalsePositiveAvoided (synthetic pointer stride and hardware register capture)");
+        assert_eq!(false_pos, 3, "Expected 3 FalsePositiveAvoided (synthetic pointer stride, hardware register capture, and in-process VEH)");
+    }
+
+    // --- CAE-1D Phase 2: Native Hardware Instruction Tracing Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_a_straight_line() {
+        let report = WindowsNativeDebugger::trace_kernel("exp-a", 42, 100)
+            .expect("Native trace of exp-a should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 3, "Exp A has exactly 3 straight-line instructions");
+        assert_eq!(report.return_value_rax, 104, "Formula (42 + 10) * 2 = 104");
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["mov", "add", "shl"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_b_branch_even() {
+        // Even input (42) -> test rcx, 1 produces ZF=1 -> JNZ is NOT taken -> executes mov eax, 100 -> jmp exit
+        let report = WindowsNativeDebugger::trace_kernel("exp-b", 42, 100)
+            .expect("Native trace of exp-b (even) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 4, "Exp B (even) executes 4 instructions");
+        assert_eq!(report.return_value_rax, 100);
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["test", "jne", "mov", "jmp"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_b_branch_odd() {
+        // Odd input (7) -> test rcx, 1 produces ZF=0 -> JNZ IS taken -> executes mov eax, 200 -> exit
+        let report = WindowsNativeDebugger::trace_kernel("exp-b", 7, 100)
+            .expect("Native trace of exp-b (odd) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 3, "Exp B (odd) executes 3 instructions");
+        assert_eq!(report.return_value_rax, 200);
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["test", "jne", "mov"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_c_loop_zero() {
+        // Loop count 0: xor, test, jz [taken]
+        let report = WindowsNativeDebugger::trace_kernel("exp-c", 0, 100)
+            .expect("Native trace of exp-c (0) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 3);
+        assert_eq!(report.return_value_rax, 0);
+        assert_eq!(report.final_flags.zf, true);
+
+        let mnemonics: Vec<&str> = report.steps.iter().map(|s| s.mnemonic.as_str()).collect();
+        assert_eq!(mnemonics, vec!["xor", "test", "je"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_c_loop_one() {
+        // Loop count 1: xor, (test, jz, add, dec, jmp) * 1, test, jz -> 1 + 5 + 2 = 8 instructions
+        let report = WindowsNativeDebugger::trace_kernel("exp-c", 1, 100)
+            .expect("Native trace of exp-c (1) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 8);
+        assert_eq!(report.return_value_rax, 1);
+        assert_eq!(report.final_registers.rcx, 0);
+        assert_eq!(report.final_flags.zf, true);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_c_loop_five() {
+        // Loop count 5: 1 + 5*5 + 2 = 28 instructions. Sum = 15.
+        let report = WindowsNativeDebugger::trace_kernel("exp-c", 5, 100)
+            .expect("Native trace of exp-c (5) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 28);
+        assert_eq!(report.return_value_rax, 15);
+        assert_eq!(report.final_registers.rcx, 0);
+        assert_eq!(report.final_flags.zf, true);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_budget_exhaustion_safety() {
+        // Run loop with n=100 (which would be 503 steps), but cap budget at 10 steps.
+        let report = WindowsNativeDebugger::trace_kernel("exp-c", 100, 10)
+            .expect("Native trace with budget exhaustion should succeed cleanly");
+
+        assert_eq!(report.status, NativeTraceStatus::BudgetExhausted(10));
+        assert_eq!(report.total_observed_instructions, 10);
     }
 }

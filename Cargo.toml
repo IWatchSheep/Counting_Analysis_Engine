@@ -2,6 +2,7 @@
 name = "Counting_Analysis_Engine"
 version = "0.1.0"
 edition = "2024"
+default-run = "Counting_Analysis_Engine"
 
 [lib]
 name = "Counting_Analysis_Engine"
@@ -10,6 +11,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "Counting_Analysis_Engine"
 path = "src/main.rs"
+
+[[bin]]
+name = "cae_trace_target"
+path = "src/bin/cae_trace_target.rs"
 
 [dependencies]
 iced-x86 = "1.22.0"

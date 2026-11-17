@@ -328,6 +328,17 @@ impl InterpretationArchive {
             },
             lesson: "To verify physical silicon state, CAE must explicitly extract hardware registers and RFLAGS via inline assembly or CONTEXT structures rather than relying on high-level function return values.".to_string(),
         });
+
+        self.record(InterpretationArchiveEntry {
+            experiment_id: "CAE-1D-003".to_string(),
+            inspected_symbol: "native_hardware_instruction_tracing".to_string(),
+            assembly_pattern: "CreateProcessW(DEBUG_ONLY_THIS_PROCESS) + TF (Trap Flag 0x100)".to_string(),
+            analyzer_hypothesis: "In-process Vectored Exception Handling (VEH) is simpler than child-process debugging".to_string(),
+            verdict: InterpretationVerdict::FalsePositiveAvoided {
+                reason: "Child process isolation avoids debugger conflicts, thread race conditions, and unhandled exception crashes in the main engine".to_string(),
+            },
+            lesson: "Hardware Trap Flag single-stepping must execute within an isolated child process under DEBUG_ONLY_THIS_PROCESS to prevent corrupting host IDE debuggers or CAE analysis runtime.".to_string(),
+        });
     }
 
     /// Render human-readable Markdown table of the interpretation archive.
