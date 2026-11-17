@@ -4,8 +4,9 @@ use Counting_Analysis_Engine::llm_protocol::{
     AbstainingMockPredictor, CodeRepresentationMode, ControlledPredictor, ControlledBlindExperimentHarness,
     DeterministicPredictionEvaluator, DurablePredictionStore, ExperimentDefinition, FlawedSourceLevelMockPredictor,
     HeuristicDisassemblyMockPredictor, InstructionCountHypothesis, LeakAuditingMockPredictor,
-    LoopBranchHypothesis, ManualTrialSession, NativeTraceEvidence, PredictionRecord,
-    StereoscopicPromptGenerator, StructuredPrediction, TracerCapabilityAudit, compute_file_sha256,
+    LoopBranchHypothesis, ManualTrialSession, NativeTraceEvidence,
+    PredictionRecord, RegisterRoleHypothesis, RepresentationPilotProtocol, StereoscopicPromptGenerator,
+    StructuredPrediction, TracerCapabilityAudit, compute_file_sha256,
 };
 
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
@@ -1129,7 +1130,85 @@ fn main() {
         println!();
     }
 
+    // 13. Stereoscopic Representation Pilot Protocol & Multi-Dimensional Evaluation (CAE-1E Phase 8)
+    println!("--- [Phase 13: Stereoscopic Representation Pilot Protocol & Multi-Dimensional Evaluation (CAE-1E Phase 8)] ---");
+    let exp_phase8 = ExperimentDefinition::populate_phase8_pilot_experiment();
+    let pilot_protocol = RepresentationPilotProtocol::new(
+        "CAE-1E-PILOT-001",
+        &exp_phase8,
+        vec![0, 1, 2, 3, 4],
+        "Candidate-LLM-Evaluation-Pool",
+        Some("temperature=0.0;top_p=1.0".to_string()),
+        None,
+        "2026-11-17T14:00:00Z",
+    );
+
+    println!("Registered Exploratory Pilot Protocol ({}):", pilot_protocol.trial_identifier);
+    println!("- Target Kernel: `{}` (Collatz-Style Parity & Shift-Sub Loop)", pilot_protocol.target_kernel_name);
+    println!("- Input Evaluation Domain: `x in {:?}`", pilot_protocol.input_domain);
+    println!("- Representation Conditions: {} evaluated (A, B, C, D, E)", pilot_protocol.representation_modes.len());
+    println!("- Session Isolation Verified: `{}` (strict answer withholding)", pilot_protocol.verify_session_isolation());
+    println!("- Protocol Canonical SHA-256: `{}`", pilot_protocol.protocol_canonical_sha256);
+    println!("- Reasoning Dimensions Separated: Dynamic Count, CFG Topology, Backedges, Register Results, Confidence\n");
+
+    #[cfg(windows)]
+    {
+        println!("Live Silicon Native Trace Execution for Phase 8 Pilot (`cae_trace_target.exe exp-f`):");
+        for &val in &[0u64, 1, 2, 3, 4] {
+            if let Ok(report) = WindowsNativeDebugger::trace_kernel("exp-f", val, 100) {
+                println!("  [Silicon Trace] input={}: steps={}, backedges={}, RAX={}",
+                    val,
+                    report.total_observed_instructions,
+                    report.count_backward_branches(),
+                    report.return_value_rax,
+                );
+            }
+        }
+        println!();
+    }
+
+    let evidence_phase8 = NativeTraceEvidence::populate_phase8_pilot_evidence(None);
+    println!("Demonstrating Multi-Dimensional Evaluation & Error Attribution:");
+
+    let sample_pred = PredictionRecord::new_draft(
+        "PRED-PILOT-SAMPLE-01",
+        &exp_phase8.experiment_id,
+        "Sample-Dual-View-Predictor",
+        "Synthesized step count and CFG from Condition D structured dual view.",
+        StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::PiecewiseGeneral {
+                rules: vec![
+                    ("x == 0".to_string(), "3".to_string()),
+                    ("x == 1".to_string(), "10".to_string()),
+                    ("x == 2".to_string(), "18".to_string()),
+                    ("x == 3".to_string(), "25".to_string()),
+                    ("x == 4".to_string(), "26".to_string()),
+                ],
+            },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "3".to_string(),
+                backward_join_branches: None,
+            },
+            register_roles: vec![
+                RegisterRoleHypothesis { register_name: "RAX".to_string(), hypothesized_role: "Accumulator Result".to_string() },
+            ],
+            confidence_percent: Some(95),
+            notes_and_rationale: "Rigorous step calculation matching CFG".to_string(),
+        },
+        "2026-11-17T14:15:00Z",
+    );
+
+    let multidim_report = DeterministicPredictionEvaluator::evaluate_multidimensional(
+        &exp_phase8,
+        CodeRepresentationMode::StructuredDualView,
+        &sample_pred,
+        Some(&evidence_phase8),
+        false,
+    );
+
+    println!("{}", multidim_report.render_summary());
+
     println!("================================================================================");
-    println!("CAE-1E Phase 7 Milestone Execution Complete. Ready for independent review.");
+    println!("CAE-1E Phase 8 Milestone Execution Complete. Ready for independent review.");
     println!("================================================================================");
 }

@@ -2889,4 +2889,160 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    // --- CAE-1E Phase 8: Independent Representation Evaluation Protocol Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_f_collatz_parity_vectors() {
+        // x = 0: xor, test, jz [taken] -> 3 steps, RAX = 0, backedges = 0
+        let r0 = WindowsNativeDebugger::trace_kernel("exp-f", 0, 100)
+            .expect("Native trace of exp-f (0) should succeed");
+        assert_eq!(r0.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r0.total_observed_instructions, 3);
+        assert_eq!(r0.return_value_rax, 0);
+        assert_eq!(r0.count_backward_branches(), 0);
+
+        // x = 1: 1 odd iter (7) + init (1) + exit (2) -> 10 steps, RAX = 5, backedges = 1
+        let r1 = WindowsNativeDebugger::trace_kernel("exp-f", 1, 100)
+            .expect("Native trace of exp-f (1) should succeed");
+        assert_eq!(r1.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r1.total_observed_instructions, 10);
+        assert_eq!(r1.return_value_rax, 5);
+        assert_eq!(r1.count_backward_branches(), 1);
+
+        // x = 2: 1 even iter (8) + 1 odd iter (7) + init (1) + exit (2) -> 18 steps, RAX = 7, backedges = 2
+        let r2 = WindowsNativeDebugger::trace_kernel("exp-f", 2, 100)
+            .expect("Native trace of exp-f (2) should succeed");
+        assert_eq!(r2.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r2.total_observed_instructions, 18);
+        assert_eq!(r2.return_value_rax, 7);
+        assert_eq!(r2.count_backward_branches(), 2);
+
+        // x = 3: odd (7) -> even (8) -> odd (7) + init (1) + exit (2) -> 25 steps, RAX = 12, backedges = 3
+        let r3 = WindowsNativeDebugger::trace_kernel("exp-f", 3, 100)
+            .expect("Native trace of exp-f (3) should succeed");
+        assert_eq!(r3.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r3.total_observed_instructions, 25);
+        assert_eq!(r3.return_value_rax, 12);
+        assert_eq!(r3.count_backward_branches(), 3);
+
+        // x = 4: even (8) -> even (8) -> odd (7) + init (1) + exit (2) -> 26 steps, RAX = 9, backedges = 3
+        let r4 = WindowsNativeDebugger::trace_kernel("exp-f", 4, 100)
+            .expect("Native trace of exp-f (4) should succeed");
+        assert_eq!(r4.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r4.total_observed_instructions, 26);
+        assert_eq!(r4.return_value_rax, 9);
+        assert_eq!(r4.count_backward_branches(), 3);
+    }
+
+    #[test]
+    fn test_phase8_representation_pilot_protocol_registration() {
+        let exp = ExperimentDefinition::populate_phase8_pilot_experiment();
+        let protocol = RepresentationPilotProtocol::new(
+            "CAE-1E-PILOT-001",
+            &exp,
+            vec![0, 1, 2, 3, 4],
+            "Pilot-Predictor-Agent",
+            Some("temperature=0.0;seed=42".to_string()),
+            Some("fake_exe_hash_0123456789".to_string()),
+            "2026-11-17T14:00:00Z",
+        );
+
+        assert_eq!(protocol.trial_identifier, "CAE-1E-PILOT-001");
+        assert_eq!(protocol.target_kernel_name, "exp-f");
+        assert_eq!(protocol.representation_modes.len(), 5);
+        assert_eq!(protocol.condition_audits.len(), 5);
+        assert!(!protocol.protocol_canonical_sha256.is_empty());
+        assert!(protocol.verify_session_isolation());
+    }
+
+    #[test]
+    fn test_phase8_multidimensional_evaluation_separation_of_reasoning_dimensions() {
+        let exp = ExperimentDefinition::populate_phase8_pilot_experiment();
+        let evidence = NativeTraceEvidence::populate_phase8_pilot_evidence(None);
+
+        // Case 1: Model evaluated on Condition D (StructuredDualView) with matching topology and counts
+        let correct_pred = PredictionRecord::new_draft(
+            "PRED-PILOT-CORRECT",
+            &exp.experiment_id,
+            "Stereoscopic-Reasoning-Model",
+            "Synthesized from dual view.",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::PiecewiseGeneral {
+                    rules: vec![
+                        ("x == 0".to_string(), "3".to_string()),
+                        ("x == 1".to_string(), "10".to_string()),
+                        ("x == 2".to_string(), "18".to_string()),
+                        ("x == 3".to_string(), "25".to_string()),
+                        ("x == 4".to_string(), "26".to_string()),
+                    ],
+                },
+                loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                    loop_header_backedges: "3".to_string(),
+                    backward_join_branches: None,
+                },
+                register_roles: vec![
+                    RegisterRoleHypothesis { register_name: "RAX".to_string(), hypothesized_role: "Accumulator Result".to_string() },
+                ],
+                confidence_percent: Some(98),
+                notes_and_rationale: "Rigorous step calculation matching CFG".to_string(),
+            },
+            "2026-11-17T14:10:00Z",
+        );
+
+        let report_d = DeterministicPredictionEvaluator::evaluate_multidimensional(
+            &exp,
+            CodeRepresentationMode::StructuredDualView,
+            &correct_pred,
+            Some(&evidence),
+            false,
+        );
+
+        assert_eq!(report_d.scientific_verdict, ScientificVerdict::VerifiedPrediction);
+        assert_eq!(report_d.error_attribution, ErrorAttributionCategory::NoneVerified);
+        assert_eq!(report_d.cfg_reconstruction_status, CfgReconstructionStatus::ExactMatch);
+        assert_eq!(report_d.backedge_status, BackedgeEvaluationStatus::ExactMatch);
+        assert_eq!(report_d.register_result_status, RegisterResultEvaluationStatus::ExactMatch);
+
+        // Case 2: Model evaluated on Condition B (LocalWindows - Information Ablation)
+        let report_b = DeterministicPredictionEvaluator::evaluate_multidimensional(
+            &exp,
+            CodeRepresentationMode::LocalWindows,
+            &correct_pred,
+            Some(&evidence),
+            false,
+        );
+        assert_eq!(report_b.cfg_reconstruction_status, CfgReconstructionStatus::AblatedOrUnrequested);
+        assert_eq!(report_b.error_attribution, ErrorAttributionCategory::NoneVerified);
+
+        // Case 3: Flawed topology model (hypothesizing unrolled straight-line code on a looping kernel)
+        let flawed_pred = PredictionRecord::new_draft(
+            "PRED-PILOT-FLAWED",
+            &exp.experiment_id,
+            "Flawed-Topological-Model",
+            "Assumed straight-line unrolling.",
+            StructuredPrediction {
+                instruction_count: InstructionCountHypothesis::Constant(10),
+                loop_branch: LoopBranchHypothesis::StraightLine,
+                register_roles: vec![],
+                confidence_percent: Some(60),
+                notes_and_rationale: "Assumed zero backedges".to_string(),
+            },
+            "2026-11-17T14:15:00Z",
+        );
+
+        let report_flawed = DeterministicPredictionEvaluator::evaluate_multidimensional(
+            &exp,
+            CodeRepresentationMode::LinearDisassembly,
+            &flawed_pred,
+            Some(&evidence),
+            false,
+        );
+
+        assert_eq!(report_flawed.scientific_verdict, ScientificVerdict::PlausibleSemanticFailure);
+        assert_eq!(report_flawed.error_attribution, ErrorAttributionCategory::CompoundReasoningFailure);
+        assert!(matches!(report_flawed.cfg_reconstruction_status, CfgReconstructionStatus::OmittedBlocksOrEdges { .. }));
+        assert!(matches!(report_flawed.backedge_status, BackedgeEvaluationStatus::Discrepancy { .. }));
+    }
+
 }

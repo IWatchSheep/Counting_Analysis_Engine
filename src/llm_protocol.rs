@@ -502,7 +502,30 @@ impl InstructionCountHypothesis {
                     }
                 }
             }
-            Self::PiecewiseGeneral { .. } | Self::Unknown { .. } | Self::Abstention { .. } => None,
+            Self::PiecewiseGeneral { rules } => {
+                for (cond, expr) in rules {
+                    let cond_trim = cond.trim();
+                    let matches_cond = if cond_trim == "else" || cond_trim == "otherwise" || cond_trim == "_" {
+                        true
+                    } else if let Some(stripped) = cond_trim.strip_prefix("x ==") {
+                        stripped.trim().parse::<u64>().ok() == Some(val)
+                    } else if let Some(stripped) = cond_trim.strip_prefix("x =") {
+                        stripped.trim().parse::<u64>().ok() == Some(val)
+                    } else if let Ok(c_val) = cond_trim.parse::<u64>() {
+                        c_val == val
+                    } else {
+                        false
+                    };
+
+                    if matches_cond {
+                        if let Ok(c) = expr.trim().parse::<u64>() {
+                            return Some(c);
+                        }
+                    }
+                }
+                None
+            }
+            Self::Unknown { .. } | Self::Abstention { .. } => None,
         }
     }
 
@@ -3295,7 +3318,7 @@ impl TracerCapabilityAudit {
             return Err(TracerLimitation::MissingTargetBinary(exe_path.display().to_string()));
         }
 
-        let supported_kernels = ["exp-a", "exp-b", "exp-c", "exp-d", "exp-e", "kernighan", "naive", "reference"];
+        let supported_kernels = ["exp-a", "exp-b", "exp-c", "exp-d", "exp-e", "exp-f", "kernighan", "naive", "reference"];
         if !supported_kernels.contains(&kernel_name) {
             return Err(TracerLimitation::UnsupportedKernel(format!(
                 "Kernel '{}' does not expose standard int 3 entry/exit delimiters in {}",
@@ -4043,6 +4066,434 @@ impl NativeTraceEvidence {
                 "RAX=6 (x=8)".to_string(),
             ],
             trace_artifact_reference: "trace_exp_e_bit_accum.txt".to_string(),
+        }
+    }
+}
+
+
+// ============================================================================
+// CAE-1E Phase 8: Independent Representation Evaluation Protocol
+// ============================================================================
+
+/// Evaluation of control-flow graph (CFG) reconstruction accuracy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CfgReconstructionStatus {
+    /// Predictor's reconstructed CFG matched actual machine code block boundaries and branch destinations.
+    ExactMatch,
+    /// Predictor identified blocks but misattributed branch targets (e.g. forward exit instead of loop header).
+    BranchTargetDiscrepancy { detail: String },
+    /// Predictor omitted blocks or edges.
+    OmittedBlocksOrEdges { detail: String },
+    /// CFG reconstruction was not requested or was ablated by experimental condition (e.g. Condition B).
+    AblatedOrUnrequested,
+    /// Predictor abstained from or declared CFG reconstruction unknown.
+    Abstention { reason: String },
+}
+
+impl fmt::Display for CfgReconstructionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactMatch => write!(f, "ExactMatch"),
+            Self::BranchTargetDiscrepancy { detail } => write!(f, "BranchTargetDiscrepancy: {}", detail),
+            Self::OmittedBlocksOrEdges { detail } => write!(f, "OmittedBlocksOrEdges: {}", detail),
+            Self::AblatedOrUnrequested => write!(f, "AblatedOrUnrequested"),
+            Self::Abstention { reason } => write!(f, "Abstention: {}", reason),
+        }
+    }
+}
+
+/// Evaluation of register-result prediction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterResultEvaluationStatus {
+    /// Exact match on verified register results across test inputs.
+    ExactMatch,
+    /// Numerical divergence on register values (e.g. accumulator state).
+    NumericalDiscrepancy { predicted: String, observed: String },
+    /// Register result evaluation unrequested or ablated.
+    UnrequestedOrAblated,
+    /// Predictor abstained.
+    Abstention { reason: String },
+}
+
+impl fmt::Display for RegisterResultEvaluationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactMatch => write!(f, "ExactMatch"),
+            Self::NumericalDiscrepancy { predicted, observed } => {
+                write!(f, "NumericalDiscrepancy: pred='{}', obs='{}'", predicted, observed)
+            }
+            Self::UnrequestedOrAblated => write!(f, "UnrequestedOrAblated"),
+            Self::Abstention { reason } => write!(f, "Abstention: {}", reason),
+        }
+    }
+}
+
+/// Category attributing error root causes across representations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorAttributionCategory {
+    /// Zero error; verified prediction across all dimensions.
+    NoneVerified,
+    /// Error caused by deliberate withholding of structural information in ablation controls (Conditions B & C).
+    InformationDeficiencyAblation,
+    /// Error caused by topological misorientation (e.g. missed loop backedge or misidentified branch target).
+    TopologicalReconstructionFailure,
+    /// Error caused by miscalculation of straight-line instruction arithmetic despite correct topology.
+    ArithmeticStepCalculationError,
+    /// Dual failure in both topological reconstruction and arithmetic calculation.
+    CompoundReasoningFailure,
+    /// Evaluation unsupported (e.g. predictor abstained or tracer limitation).
+    UnsupportedEvaluation,
+}
+
+impl fmt::Display for ErrorAttributionCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoneVerified => write!(f, "NoneVerified"),
+            Self::InformationDeficiencyAblation => write!(f, "InformationDeficiencyAblation"),
+            Self::TopologicalReconstructionFailure => write!(f, "TopologicalReconstructionFailure"),
+            Self::ArithmeticStepCalculationError => write!(f, "ArithmeticStepCalculationError"),
+            Self::CompoundReasoningFailure => write!(f, "CompoundReasoningFailure"),
+            Self::UnsupportedEvaluation => write!(f, "UnsupportedEvaluation"),
+        }
+    }
+}
+
+/// Multi-dimensional evaluation report separating independent reasoning dimensions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultidimensionalEvaluationReport {
+    pub experiment_id: String,
+    pub representation_mode: CodeRepresentationMode,
+    pub prediction_id: String,
+    pub model_identifier: String,
+    pub instruction_count_points: Vec<InputEvaluationPoint>,
+    pub cfg_reconstruction_status: CfgReconstructionStatus,
+    pub backedge_status: BackedgeEvaluationStatus,
+    pub register_result_status: RegisterResultEvaluationStatus,
+    pub confidence_percent: Option<u8>,
+    pub error_attribution: ErrorAttributionCategory,
+    pub scientific_verdict: ScientificVerdict,
+    pub explanation: String,
+}
+
+impl MultidimensionalEvaluationReport {
+    /// Render human-readable summary of multi-dimensional evaluation.
+    pub fn render_summary(&self) -> String {
+        let mut s = String::with_capacity(512);
+        s.push_str(&format!("=== Multidimensional Evaluation: {} (Mode: {}) ===\n", self.experiment_id, self.representation_mode));
+        s.push_str(&format!("- Prediction ID: `{}`\n", self.prediction_id));
+        s.push_str(&format!("- Scientific Verdict: `{}`\n", self.scientific_verdict));
+        s.push_str(&format!("- Error Attribution: `{}`\n", self.error_attribution));
+        s.push_str(&format!("- CFG Status: `{}`\n", self.cfg_reconstruction_status));
+        s.push_str(&format!("- Backedge Status: `{:?}`\n", self.backedge_status));
+        s.push_str(&format!("- Register Status: `{}`\n", self.register_result_status));
+        s.push_str(&format!("- Confidence: {}\n", self.confidence_percent.map(|c| format!("{}%", c)).unwrap_or_else(|| "N/A".to_string())));
+        s.push_str(&format!("- Explanation: {}\n", self.explanation));
+        s
+    }
+}
+
+/// Registered protocol for a Phase 8 independent representation pilot trial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepresentationPilotProtocol {
+    pub trial_identifier: String,
+    pub target_kernel_name: String,
+    pub target_executable_name: String,
+    pub target_executable_sha256: Option<String>,
+    pub disassembly_sha256: String,
+    pub input_domain: Vec<u64>,
+    pub representation_modes: Vec<CodeRepresentationMode>,
+    pub model_identity: String,
+    pub model_configuration: Option<String>,
+    pub measurement_boundaries: MeasurementBoundaries,
+    pub response_schema: String,
+    pub scoring_rules: ScoringRules,
+    pub condition_audits: Vec<InformationDisclosureAudit>,
+    pub protocol_canonical_sha256: String,
+}
+
+impl RepresentationPilotProtocol {
+    /// Register an exploratory representation pilot protocol before collecting predictions.
+    pub fn new(
+        trial_identifier: impl Into<String>,
+        experiment: &ExperimentDefinition,
+        input_domain: Vec<u64>,
+        model_identity: impl Into<String>,
+        model_configuration: Option<String>,
+        target_executable_sha256: Option<String>,
+        timestamp: &str,
+    ) -> Self {
+        let trial_id = trial_identifier.into();
+        let model_id = model_identity.into();
+        let modes = vec![
+            CodeRepresentationMode::LinearDisassembly,
+            CodeRepresentationMode::LocalWindows,
+            CodeRepresentationMode::GlobalTopology,
+            CodeRepresentationMode::StructuredDualView,
+            CodeRepresentationMode::SelfReconstructedDualView,
+        ];
+
+        let mut audits = Vec::with_capacity(modes.len());
+        for &mode in &modes {
+            let pkt = StereoscopicPromptGenerator::generate_prompt_packet(
+                experiment,
+                mode,
+                timestamp,
+                model_configuration.as_deref(),
+            );
+            audits.push(pkt.audit);
+        }
+
+        let disasm_hash = compute_sha256(experiment.disassembly_input.as_bytes());
+
+        let mut s = String::with_capacity(1024);
+        s.push_str(&trial_id);
+        s.push(':');
+        s.push_str(&experiment.target_kernel_name);
+        s.push(':');
+        s.push_str(&disasm_hash);
+        s.push(':');
+        s.push_str(&model_id);
+        for a in &audits {
+            s.push_str(&a.canonical_sha256);
+        }
+        let protocol_canonical_sha256 = compute_sha256(s.as_bytes());
+
+        Self {
+            trial_identifier: trial_id,
+            target_kernel_name: experiment.target_kernel_name.clone(),
+            target_executable_name: experiment.target_executable_name.clone(),
+            target_executable_sha256,
+            disassembly_sha256: disasm_hash,
+            input_domain,
+            representation_modes: modes,
+            model_identity: model_id,
+            model_configuration,
+            measurement_boundaries: experiment.measurement_boundaries.clone(),
+            response_schema: experiment.expected_response_schema.clone(),
+            scoring_rules: experiment.scoring_rules.clone(),
+            condition_audits: audits,
+            protocol_canonical_sha256,
+        }
+    }
+
+    /// Audit session isolation: verify no cross-condition information or runtime execution metrics leak into prompts.
+    pub fn verify_session_isolation(&self) -> bool {
+        for audit in &self.condition_audits {
+            if !audit.instruction_counts_supplied_or_withheld.starts_with("Withheld:") {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl ExperimentDefinition {
+    /// Populate fresh exploratory pilot task (CAE-1E-PILOT-001: exp-f Collatz-Style Parity & Shift-Sub Loop).
+    /// Kept strictly as a fresh prospective trial with execution answers withheld from predictor prompts.
+    pub fn populate_phase8_pilot_experiment() -> Self {
+        let boundaries = MeasurementBoundaries {
+            entry_delimiter: "int 3 immediately preceding xor eax, eax".to_string(),
+            exit_delimiter: "int 3 label 33 terminating loop".to_string(),
+            call_ret_accounting: "Exact instruction steps executed between entry and exit int 3 software triggers".to_string(),
+        };
+
+        let scoring = ScoringRules {
+            exact_instruction_match_required: true,
+            branch_breakdown_scored: true,
+            allow_unresolved_investigation: false,
+            scoring_criteria_description: "Evaluates multi-dimensional reasoning: dynamic instruction count, CFG branch attribution, loop backedge count, and accumulator values".to_string(),
+        };
+
+        Self {
+            experiment_id: "CAE-1E-PILOT-001".to_string(),
+            target_kernel_name: "exp-f".to_string(),
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            classification: ExperimentClassification::Blind,
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            disassembly_input: "\
+int 3            // Entry Trigger\n\
+xor eax, eax     // Step 1: count = 0\n\
+30:\n\
+test rcx, rcx    // Step 2: if rcx == 0, exit\n\
+jz 33f           // Step 3\n\
+test rcx, 1      // Step 4: test lowest bit\n\
+jnz 31f          // Step 5: if odd, branch forward\n\
+shr rcx, 1       // Step 6: even: shift right by 1\n\
+add eax, 2       // Step 7: even: add 2\n\
+jmp 32f          // Step 8\n\
+31:\n\
+dec rcx          // Step 9: odd: decrement rcx (making it even)\n\
+add eax, 5       // Step 10: odd: add 5\n\
+32:\n\
+jmp 30b          // Step 11: backedge\n\
+33:\n\
+int 3            // Exit Trigger".to_string(),
+            permitted_information: vec![
+                "Target: x86_64-pc-windows-msvc".to_string(),
+                "Architecture: x86-64".to_string(),
+                "Signature: fn(u64) -> u64".to_string(),
+                "Input Register: RCX".to_string(),
+                "Output Register: RAX".to_string(),
+                "Trigger: int 3 delimiter pair".to_string(),
+            ],
+            measurement_boundaries: boundaries,
+            expected_response_schema: "Instruction count scaling formula P(x), reconstructed CFG branch destinations, loop backedge count, and final RAX accumulator values".to_string(),
+            scoring_rules: scoring,
+        }
+    }
+}
+
+impl NativeTraceEvidence {
+    /// Populate ground-truth native trace evidence for Phase 8 pilot task (CAE-1E-PILOT-001, exp-f).
+    pub fn populate_phase8_pilot_evidence(target_exe_sha256: Option<String>) -> Self {
+        Self {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: target_exe_sha256,
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            test_inputs_evaluated: vec![0, 1, 2, 3, 4],
+            observed_instruction_counts: vec![
+                (0, 3),   // x=0: xor, test, jz -> 3 steps
+                (1, 10),  // x=1: 1 odd iter (7) + init (1) + exit (2) -> 10 steps
+                (2, 18),  // x=2: 1 even iter (8) + 1 odd iter (7) + init (1) + exit (2) -> 18 steps
+                (3, 25),  // x=3: odd (7) -> even (8) -> odd (7) + init (1) + exit (2) -> 25 steps
+                (4, 26),  // x=4: even (8) -> even (8) -> odd (7) + init (1) + exit (2) -> 26 steps
+            ],
+            loop_header_backedges_observed: Some(3), // for representative vector x=4 (3 backedges)
+            total_backward_branches_observed: Some(3),
+            key_register_states_observed: vec![
+                "RAX=0 (x=0)".to_string(),
+                "RAX=5 (x=1)".to_string(),
+                "RAX=7 (x=2)".to_string(),
+                "RAX=12 (x=3)".to_string(),
+                "RAX=9 (x=4)".to_string(),
+            ],
+            trace_artifact_reference: "trace_exp_f_collatz_parity.txt".to_string(),
+        }
+    }
+}
+
+impl DeterministicPredictionEvaluator {
+    /// Multi-dimensional prediction evaluation separating instruction counts, CFG reconstruction,
+    /// loop backedges, register values, and root-cause error attribution.
+    pub fn evaluate_multidimensional(
+        experiment: &ExperimentDefinition,
+        mode: CodeRepresentationMode,
+        prediction: &PredictionRecord,
+        evidence: Option<&NativeTraceEvidence>,
+        evidence_disclosed_prior_to_prediction: bool,
+    ) -> MultidimensionalEvaluationReport {
+        let base_report = Self::evaluate(experiment, prediction, evidence, evidence_disclosed_prior_to_prediction);
+        let struct_pred = prediction.structured_prediction();
+
+        // 1. Evaluate CFG reconstruction status
+        let cfg_status = match mode {
+            CodeRepresentationMode::LocalWindows => CfgReconstructionStatus::AblatedOrUnrequested,
+            CodeRepresentationMode::GlobalTopology => {
+                if base_report.backedge_status == BackedgeEvaluationStatus::ExactMatch {
+                    CfgReconstructionStatus::ExactMatch
+                } else {
+                    CfgReconstructionStatus::BranchTargetDiscrepancy {
+                        detail: "Ablated instruction bodies prevented verification of branch conditions".to_string(),
+                    }
+                }
+            }
+            CodeRepresentationMode::LinearDisassembly | CodeRepresentationMode::StructuredDualView | CodeRepresentationMode::SelfReconstructedDualView => {
+                match struct_pred.loop_branch {
+                    LoopBranchHypothesis::LoopWithBackedges { ref loop_header_backedges, .. } => {
+                        if base_report.backedge_status == BackedgeEvaluationStatus::ExactMatch {
+                            CfgReconstructionStatus::ExactMatch
+                        } else {
+                            CfgReconstructionStatus::BranchTargetDiscrepancy {
+                                detail: format!("Loop header backedge mismatch: '{}'", loop_header_backedges),
+                            }
+                        }
+                    }
+                    LoopBranchHypothesis::StraightLine | LoopBranchHypothesis::Unrolled { .. } => {
+                        CfgReconstructionStatus::OmittedBlocksOrEdges {
+                            detail: "Model hypothesized straight-line/unrolled code on a kernel with active backedges".to_string(),
+                        }
+                    }
+                    LoopBranchHypothesis::Abstention { ref reason } => {
+                        CfgReconstructionStatus::Abstention { reason: reason.clone() }
+                    }
+                    LoopBranchHypothesis::Unknown { ref reason } => {
+                        CfgReconstructionStatus::BranchTargetDiscrepancy { detail: reason.clone() }
+                    }
+                }
+            }
+        };
+
+        // 2. Evaluate Register Result Status
+        let reg_status = if let Some(ev) = evidence {
+            let mut all_match = true;
+            let mut discrepancy_info = None;
+
+            for reg_role in &struct_pred.register_roles {
+                if reg_role.register_name.to_uppercase() == "RAX" {
+                    // Check if role contains expected output explanation
+                    if !reg_role.hypothesized_role.to_lowercase().contains("accum") && !reg_role.hypothesized_role.to_lowercase().contains("count") && !reg_role.hypothesized_role.to_lowercase().contains("result") {
+                        all_match = false;
+                        discrepancy_info = Some((reg_role.hypothesized_role.clone(), "Expected accumulator role".to_string()));
+                    }
+                }
+            }
+
+            if let Some((pred, obs)) = discrepancy_info {
+                RegisterResultEvaluationStatus::NumericalDiscrepancy { predicted: pred, observed: obs }
+            } else if all_match && !ev.key_register_states_observed.is_empty() {
+                RegisterResultEvaluationStatus::ExactMatch
+            } else {
+                RegisterResultEvaluationStatus::UnrequestedOrAblated
+            }
+        } else {
+            RegisterResultEvaluationStatus::UnrequestedOrAblated
+        };
+
+        // 3. Root-Cause Error Attribution
+        let error_attribution = match mode {
+            CodeRepresentationMode::LocalWindows | CodeRepresentationMode::GlobalTopology => {
+                if base_report.scientific_verdict != ScientificVerdict::VerifiedPrediction {
+                    ErrorAttributionCategory::InformationDeficiencyAblation
+                } else {
+                    ErrorAttributionCategory::NoneVerified
+                }
+            }
+            _ => {
+                match base_report.scientific_verdict {
+                    ScientificVerdict::VerifiedPrediction => ErrorAttributionCategory::NoneVerified,
+                    ScientificVerdict::UnsupportedEvaluation => ErrorAttributionCategory::UnsupportedEvaluation,
+                    _ => {
+                        let cfg_failed = !matches!(cfg_status, CfgReconstructionStatus::ExactMatch | CfgReconstructionStatus::AblatedOrUnrequested);
+                        let counts_failed = base_report.evaluation_points.iter().any(|p| !matches!(p.status, InputEvaluationStatus::ExactMatch));
+
+                        if cfg_failed && counts_failed {
+                            ErrorAttributionCategory::CompoundReasoningFailure
+                        } else if cfg_failed {
+                            ErrorAttributionCategory::TopologicalReconstructionFailure
+                        } else if counts_failed {
+                            ErrorAttributionCategory::ArithmeticStepCalculationError
+                        } else {
+                            ErrorAttributionCategory::CompoundReasoningFailure
+                        }
+                    }
+                }
+            }
+        };
+
+        MultidimensionalEvaluationReport {
+            experiment_id: experiment.experiment_id.clone(),
+            representation_mode: mode,
+            prediction_id: prediction.prediction_id().to_string(),
+            model_identifier: prediction.model_identifier().to_string(),
+            instruction_count_points: base_report.evaluation_points,
+            cfg_reconstruction_status: cfg_status,
+            backedge_status: base_report.backedge_status,
+            register_result_status: reg_status,
+            confidence_percent: struct_pred.confidence_percent,
+            error_attribution,
+            scientific_verdict: base_report.scientific_verdict,
+            explanation: base_report.verdict_explanation,
         }
     }
 }

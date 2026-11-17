@@ -136,6 +136,37 @@ unsafe fn run_kernel_e(input: u64) -> u64 {
 
 #[inline(never)]
 #[cfg(target_arch = "x86_64")]
+unsafe fn run_kernel_f(input: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 3",            // Entry Trigger
+            "xor eax, eax",     // Step 1: count = 0
+            "30:",
+            "test rcx, rcx",    // Step 2: if rcx == 0, exit
+            "jz 33f",           // Step 3
+            "test rcx, 1",      // Step 4: test lowest bit
+            "jnz 31f",          // Step 5: if odd, branch forward
+            "shr rcx, 1",       // Step 6: even: shift right by 1
+            "add eax, 2",       // Step 7: even: add 2
+            "jmp 32f",          // Step 8
+            "31:",
+            "dec rcx",          // Step 9: odd: decrement rcx (making it even)
+            "add eax, 5",       // Step 10: odd: add 5
+            "32:",
+            "jmp 30b",          // Step 11: backedge
+            "33:",
+            "int 3",            // Exit Trigger
+            in("rcx") input,
+            out("rax") result,
+            options(nostack)
+        );
+    }
+    result
+}
+
+#[inline(never)]
+#[cfg(target_arch = "x86_64")]
 unsafe fn run_kernel_kernighan(input: u64) -> u32 {
     let result: u32;
     unsafe {
@@ -198,7 +229,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: cae_trace_target <kernel_name> [input_value]");
-        eprintln!("Available kernels: exp-a, exp-b, exp-c, exp-d, exp-e, kernighan, naive, reference");
+        eprintln!("Available kernels: exp-a, exp-b, exp-c, exp-d, exp-e, exp-f, kernighan, naive, reference");
         return;
     }
 
@@ -234,6 +265,10 @@ fn main() {
             }
             "exp-e" => {
                 let res = run_kernel_e(input);
+                println!("RESULT: {}", res);
+            }
+            "exp-f" => {
+                let res = run_kernel_f(input);
                 println!("RESULT: {}", res);
             }
             "kernighan" => {
