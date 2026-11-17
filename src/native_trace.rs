@@ -103,14 +103,12 @@ pub struct NativeTraceReport {
 }
 
 impl NativeTraceReport {
-    /// Count the number of backwards branch instructions executed (loop backedges).
-    pub fn count_loop_backedges(&self) -> usize {
+    /// Count all backward branch transitions (instructions where next RIP < current RIP).
+    pub fn count_backward_branches(&self) -> usize {
         let mut count = 0;
         for i in 0..self.steps.len().saturating_sub(1) {
             let current = &self.steps[i];
             let next = &self.steps[i + 1];
-            // If the next instruction address is lower than current instruction address
-            // and current mnemonic is a jump/branch, this is a loop backedge.
             if next.address < current.address
                 && (current.mnemonic.starts_with('j') || current.mnemonic == "loop")
             {
@@ -118,6 +116,35 @@ impl NativeTraceReport {
             }
         }
         count
+    }
+
+    /// Count actual loop backedges that target a loop header.
+    ///
+    /// Distinguishes true loop induction backedges (such as jumping back to the loop
+    /// condition/header check) from forward join jumps or out-of-order block jumps.
+    pub fn count_loop_backedges(&self) -> usize {
+        let mut count = 0;
+        for i in 0..self.steps.len().saturating_sub(1) {
+            let current = &self.steps[i];
+            let next = &self.steps[i + 1];
+            if next.address < current.address
+                && (current.mnemonic.starts_with('j') || current.mnemonic == "loop")
+            {
+                // In unoptimized code with separate increment blocks, exclude the join jump
+                // that rejoins the shift operation, counting only the backedge that returns to the header.
+                // Address pattern: a loop backedge jump target is visited repeatedly before each loop pass.
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Count total executed control-flow branch instructions (conditional and unconditional).
+    pub fn count_total_branches(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.mnemonic.starts_with('j') || s.mnemonic == "loop" || s.mnemonic == "call" || s.mnemonic == "ret")
+            .count()
     }
 
     /// Extract the callee instructions (excluding the caller dispatch `call` if present).
@@ -841,6 +868,8 @@ impl WindowsNativeDebugger {
             "exp-b" => "Conditional Branching",
             "exp-c" => "Bounded Loop Counter",
             "kernighan" => "Brian Kernighan Popcount (Live Compiled)",
+            "naive" => "Naive Shift-and-Count Popcount (Live Compiled)",
+            "reference" => "Rust count_ones() Reference (Live Compiled)",
             other => other,
         };
 

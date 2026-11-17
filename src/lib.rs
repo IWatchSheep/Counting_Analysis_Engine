@@ -180,18 +180,30 @@ mod tests {
 
     #[test]
     fn test_known_dynamic_instruction_step_scaling() {
-        // Kernighan must scale dynamically with number of set bits k
+        // Historical CAE-1C Model Prediction Invariants:
+        // 1. Naive Model: 585 + 3*k
+        assert_eq!(step_count_naive(0), 585);
+        assert_eq!(step_count_naive(1), 588);
+        assert_eq!(step_count_naive(0x5555_5555_5555_5555), 681);
+        assert_eq!(step_count_naive(u64::MAX), 777);
+
+        // 2. Kernighan Model: 9 + 13*k
         let k0 = step_count_kernighan(0);
         let k1 = step_count_kernighan(1);
         let k32 = step_count_kernighan(0x5555_5555_5555_5555);
         let k64 = step_count_kernighan(u64::MAX);
 
+        assert_eq!(k0, 9);
+        assert_eq!(k1, 22);
+        assert_eq!(k32, 425);
+        assert_eq!(k64, 841);
         assert!(k0 < k1);
         assert!(k1 < k32);
         assert!(k32 < k64);
 
-        // Reference must be constant
-        assert_eq!(step_count_reference(0), step_count_reference(u64::MAX));
+        // 3. Reference Model: 7 (POPCNT assumption)
+        assert_eq!(step_count_reference(0), 7);
+        assert_eq!(step_count_reference(u64::MAX), 7);
     }
 
     #[test]
@@ -854,6 +866,147 @@ mod tests {
                 (5 + 5 * k as isize) - (9 + 13 * k as isize) // -8*k - 4
             };
             assert_eq!(rel_discrepancy, expected_rel_discrepancy, "Release model discrepancy audit for input 0x{:X}", input);
+        }
+    }
+
+    // --- CAE-1D Phase 4: Native Naive and Reference (count_ones) Tracing Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_naive_debug_vectors() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        // Rigorous Branch Breakdown for naive in Debug:
+        // - Loop header backedge (jmp short 00007FF68A073065h): exactly 64 times for all inputs.
+        // - Increment forward join (jmp short 00007FF68A073093h, which jumps backward over the shift): exactly k times.
+        // - Total backward branch instructions executed: 64 + k.
+        // - True loop header induction backedges: exactly 64.
+        let test_cases = [
+            (0u64, 0u32, 4653, 4652, 64, 64),
+            (1u64, 1u32, 4661, 4660, 65, 64),
+            (7u64, 3u32, 4677, 4676, 67, 64),
+            (0x5555_5555_5555_5555u64, 32u32, 4909, 4908, 96, 64),
+            (u64::MAX, 64u32, 5165, 5164, 128, 64),
+        ];
+
+        for (input, expected_count, expected_total, expected_internal, expected_backward_branches, expected_header_backedges) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "naive", input, 10000)
+                .expect("Native trace of naive (debug) should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            assert_eq!(report.total_observed_instructions, expected_total, "Mismatch on input 0x{:X}", input);
+            assert_eq!(report.function_instruction_count(), expected_internal, "Mismatch on input 0x{:X}", input);
+            assert_eq!(report.count_backward_branches(), expected_backward_branches, "Backward branches mismatch on input 0x{:X}", input);
+
+            // Audit true loop header backedges specifically:
+            // In unoptimized debug code, the loop backedge is the unconditional jump at the end of the loop
+            // returning to the Range::next iterator invocation at the loop header.
+            // Address pattern: displacement in operand string contains "65h" (e.g. jmp short 00007FF6...65h)
+            let header_backedges = report.steps.iter().enumerate().filter(|(i, s)| {
+                if *i + 1 < report.steps.len() {
+                    let next = &report.steps[*i + 1];
+                    (s.mnemonic == "jmp" || s.mnemonic.starts_with('j')) && next.address < s.address && s.operands_str.contains("65h")
+                } else {
+                    false
+                }
+            }).count();
+            assert_eq!(header_backedges, expected_header_backedges, "Header backedges mismatch on input 0x{:X}", input);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_trace_step_indexing_integrity() {
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+        let report = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "reference", 1, 1000)
+            .expect("Native trace of reference (release) must succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 21, "Total observed instructions must be exactly 21");
+        assert_eq!(report.function_instruction_count(), 20, "Function internal instructions must be exactly 20");
+        assert_eq!(report.steps.len(), 21, "Report steps vector length must be exactly 21");
+
+        // Rigorous check: Every step's step_index must strictly equal its 1-based index (1..=21)
+        for (i, step) in report.steps.iter().enumerate() {
+            assert_eq!(step.step_index, i + 1, "Step index must match 1-based vector index");
+        }
+        let last_step = report.steps.last().unwrap();
+        assert_eq!(last_step.step_index, 21, "Final step (RET) step_index must be 21, not 22");
+        assert_eq!(last_step.mnemonic, "ret", "Final instruction must be RET");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_naive_release_vectors() {
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+        let test_cases = [
+            (0u64, 0u32),
+            (1u64, 1u32),
+            (7u64, 3u32),
+            (0x5555_5555_5555_5555u64, 32u32),
+            (u64::MAX, 64u32),
+        ];
+
+        for (input, expected_count) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "naive", input, 5000)
+                .expect("Native trace of naive (release) should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            // In release, unrolled straight-line bit-test sequence: exactly 1 dispatch call + 196 internal instrs
+            assert_eq!(report.total_observed_instructions, 197);
+            assert_eq!(report.function_instruction_count(), 196);
+            assert_eq!(report.count_loop_backedges(), 0, "Unrolled sequence has zero loop backedges");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_reference_debug_vectors() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let test_cases = [
+            (0u64, 0u32),
+            (1u64, 1u32),
+            (7u64, 3u32),
+            (0x5555_5555_5555_5555u64, 32u32),
+            (u64::MAX, 64u32),
+        ];
+
+        for (input, expected_count) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "reference", input, 1000)
+                .expect("Native trace of reference (debug) should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            // Default target baseline: software bitwise tree (24 internal instrs + 1 call)
+            assert_eq!(report.total_observed_instructions, 25);
+            assert_eq!(report.function_instruction_count(), 24);
+            assert_eq!(report.count_loop_backedges(), 0);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_reference_release_vectors() {
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+        let test_cases = [
+            (0u64, 0u32),
+            (1u64, 1u32),
+            (7u64, 3u32),
+            (0x5555_5555_5555_5555u64, 32u32),
+            (u64::MAX, 64u32),
+        ];
+
+        for (input, expected_count) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "reference", input, 1000)
+                .expect("Native trace of reference (release) should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            // In release: software bitwise tree without stack frame (20 internal instrs + 1 call)
+            assert_eq!(report.total_observed_instructions, 21);
+            assert_eq!(report.function_instruction_count(), 20);
+            assert_eq!(report.count_loop_backedges(), 0);
         }
     }
 

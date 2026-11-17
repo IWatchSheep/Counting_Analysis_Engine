@@ -6,8 +6,12 @@ use Counting_Analysis_Engine::dynamic_analysis::measure_dynamic_kernel;
 use Counting_Analysis_Engine::emulation::{
     MicroExperiments, ModelVsEmulatorComparison, X64MicroEmulator,
 };
-use Counting_Analysis_Engine::dynamic_analysis::step_count_kernighan;
-use Counting_Analysis_Engine::instrumentation::popcount_kernighan_instrumented;
+use Counting_Analysis_Engine::dynamic_analysis::{
+    step_count_kernighan, step_count_naive, step_count_reference,
+};
+use Counting_Analysis_Engine::instrumentation::{
+    popcount_kernighan_instrumented, popcount_naive_instrumented, popcount_reference_instrumented,
+};
 use Counting_Analysis_Engine::native_trace::{
     FiveTierPopcountComparison, FourTierComparison, PopcountModelAuditComparison, WindowsNativeDebugger,
 };
@@ -543,6 +547,230 @@ fn main() {
         println!("{}", PopcountModelAuditComparison::render_markdown_table(&audit_rows));
     }
 
+    // 10. Native Tracing of Naive Shift-and-Count & Rust count_ones() (CAE-1D Phase 4)
+    println!("--- [Phase 10: Native Tracing of Naive Shift-and-Count & Rust count_ones() (CAE-1D Phase 4)] ---\n");
+    #[cfg(windows)]
+    {
+        println!("Executing isolated native instruction tracing of live compiled `popcount_naive` and `popcount_reference`...");
+        println!("Comparing unoptimized Debug (`dev`) build vs. optimized Release (`--release`) build on physical silicon.\n");
+
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+
+        let sample_cases = [
+            ("Zero Bits (k=0)", 0x0000_0000_0000_0000u64),
+            ("Single Bit Set (Sparse: k=1)", 0x0000_0000_0000_0001u64),
+            ("Three Bits Set (k=3)", 0x0000_0000_0000_0007u64),
+            ("Alternating Bits (Balanced: k=32)", 0x5555_5555_5555_5555u64),
+            ("All Bits Set (Dense: k=64)", u64::MAX),
+        ];
+
+        // Print trace samples for k=1 in Debug
+        if debug_exe.exists() {
+            println!("### [Debug Profile Trace Sample: popcount_naive (k=1)]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "naive", 1, 10000) {
+                println!("{}", rep.render_summary());
+            }
+
+            println!("### [Debug Profile Trace Sample: popcount_reference (k=1)]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "reference", 1, 1000) {
+                println!("{}", rep.render_summary());
+            }
+        }
+
+        // Print trace samples for k=1 in Release
+        if release_exe.exists() {
+            println!("### [Release Profile Trace Sample: popcount_naive (k=1)]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "naive", 1, 5000) {
+                println!("{}", rep.render_summary());
+            }
+
+            println!("### [Release Profile Trace Sample: popcount_reference (k=1)]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "reference", 1, 1000) {
+                println!("{}", rep.render_summary());
+            }
+        }
+
+        let mut phase4_five_tier_rows = Vec::new();
+        let mut phase4_audit_rows = Vec::new();
+
+        // 1. popcount_naive Debug
+        if debug_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (count, ops) = popcount_naive_instrumented(val);
+                let k = count as usize;
+                let total_ops = (ops.loop_iterations + ops.bit_shifts + ops.bitwise_ands + ops.condition_evaluations + ops.counter_updates) as usize;
+                let original_prediction = step_count_naive(val) as usize; // CAE-1C model: 585 + 3*k
+                let revised_model = 4652 + 8 * k;
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "naive", val, 10000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    phase4_five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Naive Debug",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 37,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Loop has exactly 64 true header induction backedges + k backward join jumps from counter increment; 70 instrs/iter iterator helper overhead.",
+                    });
+
+                    phase4_audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Naive Debug",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model assumed flat 7 instrs/iter loop. Unoptimized rustc desugars 0..64 into Range iterator calling Step::forward/Iterator::next helpers (~70 instrs/iter). Exactly 64 true loop-header backedges executed.",
+                    });
+                }
+            }
+        }
+
+        // 2. popcount_naive Release
+        if release_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (_count, ops) = popcount_naive_instrumented(val);
+                let total_ops = (ops.loop_iterations + ops.bit_shifts + ops.bitwise_ands + ops.condition_evaluations + ops.counter_updates) as usize;
+                let original_prediction = step_count_naive(val) as usize;
+                let revised_model = 196;
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "naive", val, 5000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    phase4_five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Naive Release",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 196,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Loop completely unrolled into 196 straight-line instructions (BT and ADC across all 64 bits). Zero loop backedges.",
+                    });
+
+                    phase4_audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Naive Release",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model assumed 64-iteration loop. LLVM unrolls entire 64-step loop into straight-line non-branching BT/ADC bit-extraction tree (196 instrs invariant).",
+                    });
+                }
+            }
+        }
+
+        // 3. popcount_reference Debug
+        if debug_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (_count, ops) = popcount_reference_instrumented(val);
+                let total_ops = ops.opaque_invocations as usize;
+                let original_prediction = step_count_reference(val) as usize; // CAE-1C model: 7 (POPCNT assumption)
+                let revised_model = 24;
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "reference", val, 1000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    phase4_five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Reference Debug",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 24,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Software parallel bitwise tree fallback on baseline x86-64 target (no hardware POPCNT enabled without target-cpu=native).",
+                    });
+
+                    phase4_audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Reference Debug",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model assumed compiler emits hardware POPCNT (7 instrs). Baseline x86-64 target does not enable the popcnt feature; compiler emits 24-instr software bitwise tree.",
+                    });
+                }
+            }
+        }
+
+        // 4. popcount_reference Release
+        if release_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (_count, ops) = popcount_reference_instrumented(val);
+                let total_ops = ops.opaque_invocations as usize;
+                let original_prediction = step_count_reference(val) as usize;
+                let revised_model = 20;
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "reference", val, 1000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    phase4_five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Reference Release",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 20,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Software parallel bitwise tree optimized into registers without stack frame (20 straight-line instructions).",
+                    });
+
+                    phase4_audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Reference Release",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model assumed hardware POPCNT. Baseline x86-64 target emits 20 straight-line instructions for parallel bit-reduction tree without stack frame.",
+                    });
+                }
+            }
+        }
+
+        println!("{}", FiveTierPopcountComparison::render_markdown_table(&phase4_five_tier_rows));
+        println!("{}", PopcountModelAuditComparison::render_markdown_table(&phase4_audit_rows));
+    }
+
     println!("--- [Scientific Limitation & Formal Verification Status] ---\n");
     println!("1. Functional Output Equivalence vs. Intermediate Architectural Bisimulation:");
     println!("   - Current live differential tests verify that for given 64-bit inputs, the emulator's final");
@@ -565,6 +793,6 @@ fn main() {
     println!("     helpers, dynamic link libraries, and complex multi-threaded scheduling.\n");
 
     println!("================================================================================");
-    println!("CAE-1D Phase 3 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1D Phase 4 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }
