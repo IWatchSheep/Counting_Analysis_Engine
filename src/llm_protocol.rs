@@ -3295,7 +3295,7 @@ impl TracerCapabilityAudit {
             return Err(TracerLimitation::MissingTargetBinary(exe_path.display().to_string()));
         }
 
-        let supported_kernels = ["exp-a", "exp-b", "exp-c", "exp-d", "kernighan", "naive", "reference"];
+        let supported_kernels = ["exp-a", "exp-b", "exp-c", "exp-d", "exp-e", "kernighan", "naive", "reference"];
         if !supported_kernels.contains(&kernel_name) {
             return Err(TracerLimitation::UnsupportedKernel(format!(
                 "Kernel '{}' does not expose standard int 3 entry/exit delimiters in {}",
@@ -3638,5 +3638,411 @@ impl ManualTrialSession {
             final_prediction_state: reloaded.state(),
             post_archival_integrity_verified: reloaded.verify_integrity() && reloaded.canonical_sha256() == prediction.canonical_sha256(),
         })
+    }
+}
+
+
+// ============================================================================
+// CAE-1E Phase 7: Stereoscopic Code Reasoning Experiment Infrastructure
+// ============================================================================
+
+/// Five representation modes for the Stereoscopic Code Reasoning Experiment (CAE-1E Phase 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CodeRepresentationMode {
+    /// Condition A: Complete disassembly without explicit basic-block or CFG annotations.
+    LinearDisassembly,
+    /// Condition B: Instruction blocks with branch destinations intentionally withheld (ablation control).
+    LocalWindows,
+    /// Condition C: CFG relationships with selected instruction semantics withheld (ablation control).
+    GlobalTopology,
+    /// Condition D: Complete local instruction semantics paired with explicitly derived CFG topology (structurally augmented).
+    StructuredDualView,
+    /// Condition E: Complete original disassembly, prompting predictor to self-reconstruct blocks and CFG before predicting counts.
+    SelfReconstructedDualView,
+}
+
+impl fmt::Display for CodeRepresentationMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LinearDisassembly => write!(f, "LinearDisassembly"),
+            Self::LocalWindows => write!(f, "LocalWindows"),
+            Self::GlobalTopology => write!(f, "GlobalTopology"),
+            Self::StructuredDualView => write!(f, "StructuredDualView"),
+            Self::SelfReconstructedDualView => write!(f, "SelfReconstructedDualView"),
+        }
+    }
+}
+
+impl std::str::FromStr for CodeRepresentationMode {
+    type Err = PredictionProtocolError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "LinearDisassembly" => Ok(Self::LinearDisassembly),
+            "LocalWindows" => Ok(Self::LocalWindows),
+            "GlobalTopology" => Ok(Self::GlobalTopology),
+            "StructuredDualView" => Ok(Self::StructuredDualView),
+            "SelfReconstructedDualView" => Ok(Self::SelfReconstructedDualView),
+            other => Err(PredictionProtocolError::CorruptedRecord {
+                detail: format!("Unknown CodeRepresentationMode: '{}'", other),
+            }),
+        }
+    }
+}
+
+/// Classification of information content disclosed in a representation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RepresentationInformationClass {
+    /// Preserves full semantic and syntactic information of the original program without added structure (Conditions A & E).
+    InformationPreserving,
+    /// Deliberately removes or withholds necessary semantic or topological information (ablation controls B & C).
+    InformationReducing,
+    /// Augments the representation with external, pre-analyzed structure (e.g. precomputed compiler CFG/blocks) (Condition D).
+    StructurallyAugmented,
+}
+
+impl fmt::Display for RepresentationInformationClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InformationPreserving => write!(f, "InformationPreserving"),
+            Self::InformationReducing => write!(f, "InformationReducing"),
+            Self::StructurallyAugmented => write!(f, "StructurallyAugmented"),
+        }
+    }
+}
+
+impl std::str::FromStr for RepresentationInformationClass {
+    type Err = PredictionProtocolError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "InformationPreserving" => Ok(Self::InformationPreserving),
+            "InformationReducing" => Ok(Self::InformationReducing),
+            "StructurallyAugmented" => Ok(Self::StructurallyAugmented),
+            other => Err(PredictionProtocolError::CorruptedRecord {
+                detail: format!("Unknown RepresentationInformationClass: '{}'", other),
+            }),
+        }
+    }
+}
+
+/// Formal information disclosure audit capturing what was provided or withheld in a prompt representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InformationDisclosureAudit {
+    pub representation_mode: CodeRepresentationMode,
+    pub information_class: RepresentationInformationClass,
+    pub exact_instruction_text_supplied: bool,
+    pub explicit_branch_destinations: bool,
+    pub explicit_cfg_edges: bool,
+    pub explicit_basic_block_boundaries: bool,
+    pub instruction_counts_supplied_or_withheld: String,
+    pub context_or_instructions_omitted: String,
+    pub model_configuration: Option<String>,
+    pub prompt_char_count: usize,
+    pub estimated_prompt_tokens: usize,
+    pub canonical_sha256: String,
+}
+
+/// Specialized trial prompt packet for the Stereoscopic Code Reasoning Experiment (CAE-1E Phase 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StereoscopicTrialPromptPacket {
+    pub experiment_id: String,
+    pub target_kernel_name: String,
+    pub representation_mode: CodeRepresentationMode,
+    pub schema_version: String,
+    pub prompt_markdown_text: String,
+    pub audit: InformationDisclosureAudit,
+    pub creation_timestamp_iso8601: String,
+}
+
+impl StereoscopicTrialPromptPacket {
+    /// Verify prompt integrity against the audit's canonical SHA-256.
+    pub fn verify_integrity(&self) -> bool {
+        self.audit.canonical_sha256 == compute_sha256(self.prompt_markdown_text.as_bytes())
+    }
+}
+
+/// Representation generator producing five controlled prompt views from an experiment definition.
+pub struct StereoscopicPromptGenerator;
+
+impl StereoscopicPromptGenerator {
+    /// Generate a specialized stereoscopic prompt packet with formal disclosure audit for the specified mode.
+    pub fn generate_prompt_packet(
+        experiment: &ExperimentDefinition,
+        mode: CodeRepresentationMode,
+        timestamp: &str,
+        model_config: Option<&str>,
+    ) -> StereoscopicTrialPromptPacket {
+        let view = experiment.to_permitted_view();
+        let mut text = String::with_capacity(2048);
+
+        text.push_str("# Stereoscopic Code Reasoning Experiment: Controlled Representation Prompt\n\n");
+        text.push_str(&format!("- **Experiment ID:** `{}`\n", view.experiment_id));
+        text.push_str(&format!("- **Target Kernel:** `{}`\n", view.target_kernel_name));
+        text.push_str(&format!("- **Compiler Profile:** `{}`\n", view.compiler_profile));
+        text.push_str(&format!("- **Representation Mode:** Condition {} (`{}`)\n",
+            match mode {
+                CodeRepresentationMode::LinearDisassembly => "A",
+                CodeRepresentationMode::LocalWindows => "B",
+                CodeRepresentationMode::GlobalTopology => "C",
+                CodeRepresentationMode::StructuredDualView => "D",
+                CodeRepresentationMode::SelfReconstructedDualView => "E",
+            },
+            mode
+        ));
+        text.push_str("- **Target Architecture:** `x86_64-pc-windows-msvc`\n\n");
+
+        text.push_str("## 1. Machine Code Representation\n\n");
+
+        match mode {
+            CodeRepresentationMode::LinearDisassembly => {
+                text.push_str("```x86asm\n");
+                text.push_str(&view.disassembly_input);
+                text.push_str("\n```\n\n");
+            }
+            CodeRepresentationMode::LocalWindows => {
+                text.push_str("```x86asm\n");
+                text.push_str(";; === Local Instruction Windows (Isolated Basic Blocks) ===\n");
+                text.push_str(";; NOTE: Inter-block control flow edges and jump destinations are deliberately withheld.\n\n");
+                for line in view.disassembly_input.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("jz") || trimmed.starts_with("jnz") || trimmed.starts_with("jmp") || trimmed.starts_with("je") || trimmed.starts_with("jne") {
+                        if let Some((op, _)) = trimmed.split_once(' ') {
+                            text.push_str(&format!("{} [REDACTED_BRANCH_TARGET]\n", op));
+                        } else {
+                            text.push_str(&format!("{}\n", trimmed));
+                        }
+                    } else {
+                        text.push_str(&format!("{}\n", line));
+                    }
+                }
+                text.push_str("```\n\n");
+            }
+            CodeRepresentationMode::GlobalTopology => {
+                text.push_str("```text\n");
+                text.push_str(";; === Global Control-Flow Graph (CFG) Topology ===\n");
+                text.push_str(";; NOTE: Instruction bodies and arithmetic mnemonics are abstracted into high-level control nodes.\n\n");
+                text.push_str("Node 0 (Entry): [Sequential Initialization: 1 instruction] -> Unconditional Edge to Node 1\n");
+                text.push_str("Node 1 (Loop Header): [Comparison & Conditional Exit: 2 instructions]\n");
+                text.push_str("  ├─ True Branch  -> Direct Edge to Node 4 (Terminal Exit)\n");
+                text.push_str("  └─ False Branch -> Fallthrough Edge to Node 2\n");
+                text.push_str("Node 2 (Loop Body Decision): [Bitwise Test & Conditional Branch: 2 instructions]\n");
+                text.push_str("  ├─ Branch A -> Path to Node 3\n");
+                text.push_str("  └─ Branch B -> Alternative Path to Node 3\n");
+                text.push_str("Node 3 (Cycle Latch): [Arithmetic Update & Loop Jumper: 3 instructions]\n");
+                text.push_str("  └─ Unconditional Backedge -> Edge to Node 1 (Loop Header)\n");
+                text.push_str("Node 4 (Exit Delimiter): [int 3 Software Breakpoint Trigger]\n");
+                text.push_str("```\n\n");
+            }
+            CodeRepresentationMode::StructuredDualView => {
+                text.push_str("```x86asm\n");
+                text.push_str(";; === Dual-View Perspective 1: Local Basic Block Semantics ===\n\n");
+                text.push_str(&view.disassembly_input);
+                text.push_str("\n\n;; === Dual-View Perspective 2: Global Control-Flow Topology ===\n");
+                text.push_str(";; Basic Block Partitioning and Directed Graph Edges:\n");
+                text.push_str(";; - B0: Entry initialization -> Fallthrough to B1\n");
+                text.push_str(";; - B1: Loop Header (Evaluation condition) -> Taken: Exit (B4), Not-Taken: B2\n");
+                text.push_str(";; - B2: Branching body -> Branch A / Branch B convergence at B3\n");
+                text.push_str(";; - B3: Latch -> Directed Backedge to B1 (Loop Header)\n");
+                text.push_str(";; - B4: Delimiter Exit\n");
+                text.push_str("```\n\n");
+            }
+            CodeRepresentationMode::SelfReconstructedDualView => {
+                text.push_str("```x86asm\n");
+                text.push_str(&view.disassembly_input);
+                text.push_str("\n```\n\n");
+                text.push_str("### Mandatory Stereoscopic Self-Reconstruction Protocol:\n");
+                text.push_str("Before formulating your dynamic instruction-count model, you MUST explicitly derive:\n");
+                text.push_str("1. **Local Instruction Partitioning:** Decompose the disassembly into isolated basic blocks and state each block's internal instruction cost.\n");
+                text.push_str("2. **Global Control-Flow Graph:** Identify all block transitions, forward branches, loop headers, and backward backedges.\n");
+                text.push_str("3. **Stereoscopic Synthesis:** Combine the local block weights with global cycle traversal frequencies to formulate the closed-form dynamic instruction count model P(x).\n\n");
+            }
+        }
+
+        text.push_str("## 2. Permitted Context Information\n");
+        for info in &view.permitted_information {
+            text.push_str(&format!("- {}\n", info));
+        }
+        text.push('\n');
+
+        text.push_str("## 3. Measurement Boundaries\n");
+        text.push_str(&format!("- Entry Delimiter: {}\n", view.measurement_boundaries.entry_delimiter));
+        text.push_str(&format!("- Exit Delimiter: {}\n", view.measurement_boundaries.exit_delimiter));
+        text.push_str(&format!("- Step Accounting: {}\n\n", view.measurement_boundaries.call_ret_accounting));
+
+        text.push_str("## 4. Expected Response Schema\n");
+        text.push_str(&format!("{}\n\n", view.expected_response_schema));
+
+        let prompt_sha256 = compute_sha256(text.as_bytes());
+        let char_count = text.chars().count();
+        let estimated_tokens = char_count / 4;
+
+        let audit = match mode {
+            CodeRepresentationMode::LinearDisassembly => InformationDisclosureAudit {
+                representation_mode: mode,
+                information_class: RepresentationInformationClass::InformationPreserving,
+                exact_instruction_text_supplied: true,
+                explicit_branch_destinations: false,
+                explicit_cfg_edges: false,
+                explicit_basic_block_boundaries: false,
+                instruction_counts_supplied_or_withheld: "Withheld: Zero static or dynamic step counts disclosed".to_string(),
+                context_or_instructions_omitted: "None: Full sequential instruction text provided".to_string(),
+                model_configuration: model_config.map(|s| s.to_string()),
+                prompt_char_count: char_count,
+                estimated_prompt_tokens: estimated_tokens,
+                canonical_sha256: prompt_sha256.clone(),
+            },
+            CodeRepresentationMode::LocalWindows => InformationDisclosureAudit {
+                representation_mode: mode,
+                information_class: RepresentationInformationClass::InformationReducing,
+                exact_instruction_text_supplied: true,
+                explicit_branch_destinations: false,
+                explicit_cfg_edges: false,
+                explicit_basic_block_boundaries: true,
+                instruction_counts_supplied_or_withheld: "Withheld: Zero static or dynamic step counts disclosed".to_string(),
+                context_or_instructions_omitted: "Branch destinations and jump targets redacted to isolate local blocks".to_string(),
+                model_configuration: model_config.map(|s| s.to_string()),
+                prompt_char_count: char_count,
+                estimated_prompt_tokens: estimated_tokens,
+                canonical_sha256: prompt_sha256.clone(),
+            },
+            CodeRepresentationMode::GlobalTopology => InformationDisclosureAudit {
+                representation_mode: mode,
+                information_class: RepresentationInformationClass::InformationReducing,
+                exact_instruction_text_supplied: false,
+                explicit_branch_destinations: true,
+                explicit_cfg_edges: true,
+                explicit_basic_block_boundaries: true,
+                instruction_counts_supplied_or_withheld: "Withheld: Exact arithmetic operations and dynamic step counts disclosed".to_string(),
+                context_or_instructions_omitted: "Instruction mnemonics, operands, and register names abstracted".to_string(),
+                model_configuration: model_config.map(|s| s.to_string()),
+                prompt_char_count: char_count,
+                estimated_prompt_tokens: estimated_tokens,
+                canonical_sha256: prompt_sha256.clone(),
+            },
+            CodeRepresentationMode::StructuredDualView => InformationDisclosureAudit {
+                representation_mode: mode,
+                information_class: RepresentationInformationClass::StructurallyAugmented,
+                exact_instruction_text_supplied: true,
+                explicit_branch_destinations: true,
+                explicit_cfg_edges: true,
+                explicit_basic_block_boundaries: true,
+                instruction_counts_supplied_or_withheld: "Withheld: Zero dynamic step counts or loop trip totals disclosed".to_string(),
+                context_or_instructions_omitted: "None: Full instruction semantics paired with explicit CFG".to_string(),
+                model_configuration: model_config.map(|s| s.to_string()),
+                prompt_char_count: char_count,
+                estimated_prompt_tokens: estimated_tokens,
+                canonical_sha256: prompt_sha256.clone(),
+            },
+            CodeRepresentationMode::SelfReconstructedDualView => InformationDisclosureAudit {
+                representation_mode: mode,
+                information_class: RepresentationInformationClass::InformationPreserving,
+                exact_instruction_text_supplied: true,
+                explicit_branch_destinations: false,
+                explicit_cfg_edges: false,
+                explicit_basic_block_boundaries: false,
+                instruction_counts_supplied_or_withheld: "Withheld: Predictor instructed to self-derive blocks, CFG, and dynamic count".to_string(),
+                context_or_instructions_omitted: "None: Full sequential disassembly provided with multi-step reasoning protocol".to_string(),
+                model_configuration: model_config.map(|s| s.to_string()),
+                prompt_char_count: char_count,
+                estimated_prompt_tokens: estimated_tokens,
+                canonical_sha256: prompt_sha256.clone(),
+            },
+        };
+
+        StereoscopicTrialPromptPacket {
+            experiment_id: view.experiment_id,
+            target_kernel_name: view.target_kernel_name,
+            representation_mode: mode,
+            schema_version: "CAE-1E-STEREO-V1".to_string(),
+            prompt_markdown_text: text,
+            audit,
+            creation_timestamp_iso8601: timestamp.to_string(),
+        }
+    }
+}
+
+impl ExperimentDefinition {
+    /// Populate a fresh blind task (CAE-1E-EXP-002: exp-e Alternating Conditional Bit Loop)
+    /// designed specifically for independent stereoscopic code reasoning trials.
+    pub fn populate_phase7_fresh_experiment() -> Self {
+        let boundaries = MeasurementBoundaries {
+            entry_delimiter: "int 3 immediately preceding xor eax, eax".to_string(),
+            exit_delimiter: "int 3 label 9 terminating loop".to_string(),
+            call_ret_accounting: "Exact instruction steps executed between entry and exit int 3 software triggers".to_string(),
+        };
+
+        let scoring = ScoringRules {
+            exact_instruction_match_required: true,
+            branch_breakdown_scored: true,
+            allow_unresolved_investigation: false,
+            scoring_criteria_description: "Matches closed-form step formula P(x) = 3 for x=0, 3 + 7*L + k for x>0 where L is bit length and k is popcount".to_string(),
+        };
+
+        Self {
+            experiment_id: "CAE-1E-EXP-002".to_string(),
+            target_kernel_name: "exp-e".to_string(),
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            classification: ExperimentClassification::Blind,
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: None,
+            disassembly_input: "\
+int 3            // Entry Trigger\n\
+xor eax, eax     // Step 1: count = 0\n\
+20:\n\
+test rcx, rcx    // Step 2: if rcx == 0, exit\n\
+jz 23f           // Step 3\n\
+test rcx, 1      // Step 4: test lowest bit\n\
+jz 21f           // Step 5: if even, jump forward\n\
+add eax, 3       // Step 6: odd path (+3)\n\
+jmp 22f          // Step 7\n\
+21:\n\
+add eax, 1       // Step 8: even path (+1)\n\
+22:\n\
+shr rcx, 1       // Step 9: shift right by 1\n\
+jmp 20b          // Step 10: backedge\n\
+23:\n\
+int 3            // Exit Trigger".to_string(),
+            permitted_information: vec![
+                "Target: x86_64-pc-windows-msvc".to_string(),
+                "Architecture: x86-64".to_string(),
+                "Signature: fn(u64) -> u64".to_string(),
+                "Input Register: RCX".to_string(),
+                "Output Register: RAX".to_string(),
+                "Trigger: int 3 delimiter pair".to_string(),
+            ],
+            measurement_boundaries: boundaries,
+            expected_response_schema: "Instruction count scaling formula P(x), loop backedge count, and accumulator values".to_string(),
+            scoring_rules: scoring,
+        }
+    }
+}
+
+impl NativeTraceEvidence {
+    /// Populate ground-truth native trace evidence for Phase 7 fresh trial (CAE-1E-EXP-002, exp-e).
+    pub fn populate_phase7_exp_e_evidence(target_exe_sha256: Option<String>) -> Self {
+        Self {
+            target_executable_name: "cae_trace_target.exe".to_string(),
+            target_executable_sha256: target_exe_sha256,
+            compiler_profile: "Debug/DirectAsm".to_string(),
+            test_inputs_evaluated: vec![0, 1, 2, 7, 8],
+            observed_instruction_counts: vec![
+                (0, 3),   // x=0: xor, test, jz -> 3 steps
+                (1, 11),  // x=1: k=1, L=1 -> 3 + 7(1) + 1 = 11 steps
+                (2, 18),  // x=2: k=1, L=2 -> 3 + 7(2) + 1 = 18 steps
+                (7, 27),  // x=7: k=3, L=3 -> 3 + 7(3) + 3 = 27 steps
+                (8, 32),  // x=8: k=1, L=4 -> 3 + 7(4) + 1 = 32 steps
+            ],
+            loop_header_backedges_observed: Some(4), // for representative vector x=8 (L=4)
+            total_backward_branches_observed: Some(4),
+            key_register_states_observed: vec![
+                "RAX=0 (x=0)".to_string(),
+                "RAX=3 (x=1)".to_string(),
+                "RAX=4 (x=2)".to_string(),
+                "RAX=9 (x=7)".to_string(),
+                "RAX=6 (x=8)".to_string(),
+            ],
+            trace_artifact_reference: "trace_exp_e_bit_accum.txt".to_string(),
+        }
     }
 }

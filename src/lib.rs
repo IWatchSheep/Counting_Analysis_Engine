@@ -2671,4 +2671,222 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    // --- CAE-1E Phase 7: Stereoscopic Code Reasoning Experiment Infrastructure Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_exp_e_bit_accum_vectors() {
+        // x = 0: xor, test, jz [taken] -> 3 steps, RAX = 0, backedges = 0
+        let r0 = WindowsNativeDebugger::trace_kernel("exp-e", 0, 100)
+            .expect("Native trace of exp-e (0) should succeed");
+        assert_eq!(r0.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r0.total_observed_instructions, 3);
+        assert_eq!(r0.return_value_rax, 0);
+        assert_eq!(r0.count_backward_branches(), 0);
+
+        // x = 1: k=1, L=1 -> 3 + 7(1) + 1 = 11 steps, RAX = 3, backedges = 1
+        let r1 = WindowsNativeDebugger::trace_kernel("exp-e", 1, 100)
+            .expect("Native trace of exp-e (1) should succeed");
+        assert_eq!(r1.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r1.total_observed_instructions, 11);
+        assert_eq!(r1.return_value_rax, 3);
+        assert_eq!(r1.count_backward_branches(), 1);
+
+        // x = 2: k=1, L=2 -> 3 + 7(2) + 1 = 18 steps, RAX = 4, backedges = 2
+        let r2 = WindowsNativeDebugger::trace_kernel("exp-e", 2, 100)
+            .expect("Native trace of exp-e (2) should succeed");
+        assert_eq!(r2.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r2.total_observed_instructions, 18);
+        assert_eq!(r2.return_value_rax, 4);
+        assert_eq!(r2.count_backward_branches(), 2);
+
+        // x = 7: k=3, L=3 -> 3 + 7(3) + 3 = 27 steps, RAX = 9, backedges = 3
+        let r7 = WindowsNativeDebugger::trace_kernel("exp-e", 7, 100)
+            .expect("Native trace of exp-e (7) should succeed");
+        assert_eq!(r7.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r7.total_observed_instructions, 27);
+        assert_eq!(r7.return_value_rax, 9);
+        assert_eq!(r7.count_backward_branches(), 3);
+
+        // x = 8: k=1, L=4 -> 3 + 7(4) + 1 = 32 steps, RAX = 6, backedges = 4
+        let r8 = WindowsNativeDebugger::trace_kernel("exp-e", 8, 100)
+            .expect("Native trace of exp-e (8) should succeed");
+        assert_eq!(r8.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(r8.total_observed_instructions, 32);
+        assert_eq!(r8.return_value_rax, 6);
+        assert_eq!(r8.count_backward_branches(), 4);
+    }
+
+    #[test]
+    fn test_phase7_five_representation_modes_generation_and_hashing() {
+        let exp = ExperimentDefinition::populate_phase7_fresh_experiment();
+        let modes = [
+            CodeRepresentationMode::LinearDisassembly,
+            CodeRepresentationMode::LocalWindows,
+            CodeRepresentationMode::GlobalTopology,
+            CodeRepresentationMode::StructuredDualView,
+            CodeRepresentationMode::SelfReconstructedDualView,
+        ];
+
+        let mut hashes = std::collections::HashSet::new();
+
+        for &mode in &modes {
+            let packet = StereoscopicPromptGenerator::generate_prompt_packet(
+                &exp,
+                mode,
+                "2026-11-17T13:30:00Z",
+                Some("temp=0.0;top_p=1.0"),
+            );
+
+            // Assert prompt integrity
+            assert!(packet.verify_integrity(), "Prompt packet for mode {:?} must verify against canonical hash", mode);
+            assert_eq!(packet.representation_mode, mode);
+            assert_eq!(packet.audit.representation_mode, mode);
+            assert!(packet.audit.prompt_char_count > 0);
+            assert!(packet.audit.estimated_prompt_tokens > 0);
+            assert_eq!(packet.audit.model_configuration.as_deref(), Some("temp=0.0;top_p=1.0"));
+
+            // Distinct representations must have distinct canonical hashes
+            assert!(hashes.insert(packet.audit.canonical_sha256.clone()), "Mode {:?} must produce a unique prompt hash", mode);
+        }
+
+        assert_eq!(hashes.len(), 5, "All 5 representation modes must have distinct canonical digests");
+    }
+
+    #[test]
+    fn test_phase7_information_disclosure_auditing_invariants() {
+        let exp = ExperimentDefinition::populate_phase7_fresh_experiment();
+
+        // Mode A: Linear Disassembly (Information Preserving)
+        let pkt_a = StereoscopicPromptGenerator::generate_prompt_packet(&exp, CodeRepresentationMode::LinearDisassembly, "2026-11-17T13:30:00Z", None);
+        assert_eq!(pkt_a.audit.information_class, RepresentationInformationClass::InformationPreserving);
+        assert!(pkt_a.audit.exact_instruction_text_supplied);
+        assert!(!pkt_a.audit.explicit_branch_destinations);
+        assert!(!pkt_a.audit.explicit_cfg_edges);
+        assert!(!pkt_a.audit.explicit_basic_block_boundaries);
+
+        // Mode B: Local Windows (Information Reducing / Ablation)
+        let pkt_b = StereoscopicPromptGenerator::generate_prompt_packet(&exp, CodeRepresentationMode::LocalWindows, "2026-11-17T13:30:00Z", None);
+        assert_eq!(pkt_b.audit.information_class, RepresentationInformationClass::InformationReducing);
+        assert!(pkt_b.audit.exact_instruction_text_supplied);
+        assert!(!pkt_b.audit.explicit_branch_destinations);
+        assert!(!pkt_b.audit.explicit_cfg_edges);
+        assert!(pkt_b.audit.explicit_basic_block_boundaries);
+        assert!(pkt_b.prompt_markdown_text.contains("[REDACTED_BRANCH_TARGET]"));
+
+        // Mode C: Global Topology (Information Reducing / Ablation)
+        let pkt_c = StereoscopicPromptGenerator::generate_prompt_packet(&exp, CodeRepresentationMode::GlobalTopology, "2026-11-17T13:30:00Z", None);
+        assert_eq!(pkt_c.audit.information_class, RepresentationInformationClass::InformationReducing);
+        assert!(!pkt_c.audit.exact_instruction_text_supplied);
+        assert!(pkt_c.audit.explicit_branch_destinations);
+        assert!(pkt_c.audit.explicit_cfg_edges);
+        assert!(pkt_c.audit.explicit_basic_block_boundaries);
+        assert!(pkt_c.prompt_markdown_text.contains("Loop Header"));
+
+        // Mode D: Structured Dual View (Structurally Augmented)
+        let pkt_d = StereoscopicPromptGenerator::generate_prompt_packet(&exp, CodeRepresentationMode::StructuredDualView, "2026-11-17T13:30:00Z", None);
+        assert_eq!(pkt_d.audit.information_class, RepresentationInformationClass::StructurallyAugmented);
+        assert!(pkt_d.audit.exact_instruction_text_supplied);
+        assert!(pkt_d.audit.explicit_branch_destinations);
+        assert!(pkt_d.audit.explicit_cfg_edges);
+        assert!(pkt_d.audit.explicit_basic_block_boundaries);
+        assert!(pkt_d.prompt_markdown_text.contains("Dual-View Perspective 1"));
+        assert!(pkt_d.prompt_markdown_text.contains("Dual-View Perspective 2"));
+
+        // Mode E: Self-Reconstructed Dual View (Information Preserving)
+        let pkt_e = StereoscopicPromptGenerator::generate_prompt_packet(&exp, CodeRepresentationMode::SelfReconstructedDualView, "2026-11-17T13:30:00Z", None);
+        assert_eq!(pkt_e.audit.information_class, RepresentationInformationClass::InformationPreserving);
+        assert!(pkt_e.audit.exact_instruction_text_supplied);
+        assert!(!pkt_e.audit.explicit_branch_destinations);
+        assert!(!pkt_e.audit.explicit_cfg_edges);
+        assert!(!pkt_e.audit.explicit_basic_block_boundaries);
+        assert!(pkt_e.prompt_markdown_text.contains("Mandatory Stereoscopic Self-Reconstruction Protocol"));
+    }
+
+    #[test]
+    fn test_phase7_leakage_audit_strictly_withholds_all_runtime_traces() {
+        let exp = ExperimentDefinition::populate_phase7_fresh_experiment();
+        let modes = [
+            CodeRepresentationMode::LinearDisassembly,
+            CodeRepresentationMode::LocalWindows,
+            CodeRepresentationMode::GlobalTopology,
+            CodeRepresentationMode::StructuredDualView,
+            CodeRepresentationMode::SelfReconstructedDualView,
+        ];
+
+        for &mode in &modes {
+            let pkt = StereoscopicPromptGenerator::generate_prompt_packet(&exp, mode, "2026-11-17T13:30:00Z", None);
+            let text = &pkt.prompt_markdown_text;
+
+            assert!(!text.contains("trace_observed_counts"), "Mode {:?} must not leak trace_observed_counts", mode);
+            assert!(!text.contains("observed_instruction_counts"), "Mode {:?} must not leak observed_instruction_counts", mode);
+            assert!(!text.contains("trace_artifact_reference"), "Mode {:?} must not leak trace_artifact_reference", mode);
+            assert!(!text.contains("3 + 7*L + k"), "Mode {:?} must not leak closed-form formula", mode);
+            assert!(!text.contains("32 steps"), "Mode {:?} must not leak dynamic vector counts", mode);
+            assert!(!text.contains("NativeTraceEvidence"), "Mode {:?} must not leak evidence struct", mode);
+        }
+    }
+
+    #[test]
+    fn test_phase7_prompt_provenance_and_freezing_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_phase7_store_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let exp = ExperimentDefinition::populate_phase7_fresh_experiment();
+        store.save_experiment(&exp).expect("Save experiment must succeed");
+
+        // Generate Condition D (Structured Dual View) prompt packet
+        let packet_d = StereoscopicPromptGenerator::generate_prompt_packet(
+            &exp,
+            CodeRepresentationMode::StructuredDualView,
+            "2026-11-17T13:35:00Z",
+            Some("gpt-4o-2024-08-06;temperature=0.0"),
+        );
+        assert!(packet_d.verify_integrity());
+
+        // Construct candidate prediction anchored to prompt packet
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::PiecewiseGeneral {
+                rules: vec![
+                    ("x == 0".to_string(), "3 steps".to_string()),
+                    ("x > 0".to_string(), "3 + 7*L + k steps (L = bit length, k = popcount)".to_string()),
+                ],
+            },
+            loop_branch: LoopBranchHypothesis::LoopWithBackedges {
+                loop_header_backedges: "L backedges".to_string(),
+                backward_join_branches: None,
+            },
+            register_roles: vec![
+                RegisterRoleHypothesis { register_name: "EAX".to_string(), hypothesized_role: "Accumulator".to_string() },
+                RegisterRoleHypothesis { register_name: "RCX".to_string(), hypothesized_role: "Shift Operand".to_string() },
+            ],
+            confidence_percent: Some(95),
+            notes_and_rationale: "Dual-view synthesis: 1 init + L iterations * (7 steps) + k odd extra steps + 2 exit steps".to_string(),
+        };
+
+        let mut record = PredictionRecord::new_draft(
+            "PRED-PHASE7-EXP002-D",
+            &packet_d.experiment_id,
+            "Stereoscopic-Analyst",
+            "Synthesized from Condition D dual view.",
+            structured,
+            "2026-11-17T13:40:00Z",
+        );
+
+        // Pre-disclosure freeze
+        record.freeze().expect("Record freeze must succeed");
+        assert_eq!(record.state(), PredictionState::Frozen);
+        assert!(record.verify_integrity());
+
+        // Save to durable store in Frozen state
+        store.save_prediction(&record).expect("Save frozen prediction must succeed");
+
+        // Reload and verify frozen hash
+        let reloaded = store.load_prediction("PRED-PHASE7-EXP002-D").expect("Reload must succeed");
+        assert_eq!(reloaded.state(), PredictionState::Frozen);
+        assert_eq!(reloaded.canonical_sha256(), record.canonical_sha256());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 }

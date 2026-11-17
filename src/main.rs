@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 
 use Counting_Analysis_Engine::llm_protocol::{
-    AbstainingMockPredictor, ControlledPredictor, ControlledBlindExperimentHarness, DeterministicPredictionEvaluator,
-    DurablePredictionStore, ExperimentDefinition, FlawedSourceLevelMockPredictor,
+    AbstainingMockPredictor, CodeRepresentationMode, ControlledPredictor, ControlledBlindExperimentHarness,
+    DeterministicPredictionEvaluator, DurablePredictionStore, ExperimentDefinition, FlawedSourceLevelMockPredictor,
     HeuristicDisassemblyMockPredictor, InstructionCountHypothesis, LeakAuditingMockPredictor,
     LoopBranchHypothesis, ManualTrialSession, NativeTraceEvidence, PredictionRecord,
-    StructuredPrediction, TracerCapabilityAudit, compute_file_sha256,
+    StereoscopicPromptGenerator, StructuredPrediction, TracerCapabilityAudit, compute_file_sha256,
 };
 
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
@@ -1058,5 +1058,78 @@ fn main() {
 
     println!("================================================================================");
     println!("CAE-1E Phase 6 Milestone Execution Complete. Ready for technical audit.");
+    println!("================================================================================\n");
+
+    // 12. CAE-1E Phase 7: Stereoscopic Code Reasoning Experiment Infrastructure
+    println!("--- [Phase 12: Stereoscopic Code Reasoning Infrastructure (CAE-1E Phase 7)] ---\n");
+    println!("Guiding Principle: Investigate whether an LLM's dynamic prediction accuracy changes");
+    println!("when the exact same program is presented across five controlled representation modes.\n");
+
+    let exp_phase7 = ExperimentDefinition::populate_phase7_fresh_experiment();
+    println!("Fresh Stereoscopic Blind Task Definition:");
+    println!("- Experiment ID: `{}`", exp_phase7.experiment_id);
+    println!("- Target Kernel: `{}` (Alternating Conditional Bit Loop)", exp_phase7.target_kernel_name);
+    println!("- Profile: `{}`", exp_phase7.compiler_profile);
+    println!("- Evaluation Vector Domain: `x in {{0, 1, 2, 7, 8}}`\n");
+
+    let modes = [
+        CodeRepresentationMode::LinearDisassembly,
+        CodeRepresentationMode::LocalWindows,
+        CodeRepresentationMode::GlobalTopology,
+        CodeRepresentationMode::StructuredDualView,
+        CodeRepresentationMode::SelfReconstructedDualView,
+    ];
+
+    println!("Generated Five Controlled Representation Views with Information Auditing:\n");
+    for &mode in &modes {
+        let packet = StereoscopicPromptGenerator::generate_prompt_packet(
+            &exp_phase7,
+            mode,
+            "2026-11-17T13:45:00Z",
+            Some("temperature=0.0;top_p=1.0"),
+        );
+
+        println!("Condition {} (`{}`):",
+            match mode {
+                CodeRepresentationMode::LinearDisassembly => "A",
+                CodeRepresentationMode::LocalWindows => "B",
+                CodeRepresentationMode::GlobalTopology => "C",
+                CodeRepresentationMode::StructuredDualView => "D",
+                CodeRepresentationMode::SelfReconstructedDualView => "E",
+            },
+            mode
+        );
+        println!("- Information Class: `{}`", packet.audit.information_class);
+        println!("- Exact Instruction Text Supplied: `{}`", packet.audit.exact_instruction_text_supplied);
+        println!("- Explicit Branch Destinations: `{}`", packet.audit.explicit_branch_destinations);
+        println!("- Explicit CFG Edges: `{}`", packet.audit.explicit_cfg_edges);
+        println!("- Explicit Basic Block Boundaries: `{}`", packet.audit.explicit_basic_block_boundaries);
+        println!("- Omitted Context: `{}`", packet.audit.context_or_instructions_omitted);
+        println!("- Disclosed Step Counts: `{}`", packet.audit.instruction_counts_supplied_or_withheld);
+        println!("- Prompt Characters: {} (~{} tokens)", packet.audit.prompt_char_count, packet.audit.estimated_prompt_tokens);
+        println!("- Canonical Prompt SHA-256: `{}`", packet.audit.canonical_sha256);
+        println!("- Prompt Integrity Verified: `{}`\n", packet.verify_integrity());
+    }
+
+    #[cfg(windows)]
+    {
+        println!("Live Silicon Native Trace Execution for Fresh Task (`cae_trace_target.exe exp-e`):");
+        for &val in &[0u64, 1, 2, 7, 8] {
+            if let Ok(report) = WindowsNativeDebugger::trace_kernel("exp-e", val, 100) {
+                let bit_len = if val == 0 { 0 } else { 64 - val.leading_zeros() };
+                let popcnt = val.count_ones();
+                println!("  [Silicon Trace] input={:<2} (L={}, k={}): steps={:<2}, backedges={}, RAX={}",
+                    val, bit_len, popcnt,
+                    report.total_observed_instructions,
+                    report.count_backward_branches(),
+                    report.return_value_rax,
+                );
+            }
+        }
+        println!();
+    }
+
+    println!("================================================================================");
+    println!("CAE-1E Phase 7 Milestone Execution Complete. Ready for independent review.");
     println!("================================================================================");
 }
