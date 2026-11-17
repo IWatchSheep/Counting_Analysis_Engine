@@ -3,8 +3,9 @@
 use Counting_Analysis_Engine::llm_protocol::{
     AbstainingMockPredictor, ControlledPredictor, ControlledBlindExperimentHarness, DeterministicPredictionEvaluator,
     DurablePredictionStore, ExperimentDefinition, FlawedSourceLevelMockPredictor,
-    HeuristicDisassemblyMockPredictor, LeakAuditingMockPredictor, NativeTraceEvidence,
-    PredictionRecord,
+    HeuristicDisassemblyMockPredictor, InstructionCountHypothesis, LeakAuditingMockPredictor,
+    LoopBranchHypothesis, ManualTrialSession, NativeTraceEvidence, PredictionRecord,
+    StructuredPrediction, TracerCapabilityAudit, compute_file_sha256,
 };
 
 use Counting_Analysis_Engine::algorithms::{popcount_kernighan, popcount_naive, popcount_reference};
@@ -903,7 +904,70 @@ fn main() {
         let _ = std::fs::remove_dir_all(&temp_store_dir);
     }
 
+    // 10. CAE-1E Phase 5: Independent Prediction Trial Preparation
+    println!("--- [Phase 10: Independent Prediction Trial Preparation (CAE-1E Phase 5)] ---\n");
+    println!("Guiding Principle: Ensure independent predictions with complete prompt provenance,");
+    println!("genuine novelty controls (fresh kernels), cryptographic binary checks, and tracer capability auditing.\n");
+
+    let fresh_exps = ExperimentDefinition::populate_fresh_trial_experiments();
+    println!("Populated {} fresh trial experiments with genuine novelty controls:\n", fresh_exps.len());
+
+    let target_debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+    if target_debug_exe.exists()
+        && let Ok(exe_sha256) = compute_file_sha256(target_debug_exe) {
+        println!("Physical Target Executable SHA-256 (`cae_trace_target.exe`):\n  `{}`\n", exe_sha256);
+    }
+
+    let temp_trial_dir = std::env::temp_dir().join(format!("cae_phase5_demo_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    if let Ok(trial_store) = DurablePredictionStore::new(&temp_trial_dir) {
+        // Demonstrate complete prompt provenance packet generation for fresh kernel exp-b
+        let exp_b = &fresh_exps[0];
+        let packet_b = ManualTrialSession::prepare_trial(exp_b, "2026-11-17T12:00:00Z");
+        println!("Trial Prompt Packet Generated: `{}`", packet_b.experiment_id);
+        println!("- Schema Version: `{}`", packet_b.schema_version);
+        println!("- Canonical Prompt SHA-256: `{}`", packet_b.prompt_sha256);
+        println!("- Prompt Integrity Verified: `{}`\n", packet_b.verify_integrity());
+
+        // Demonstrate manual trial registration and evaluation
+        let structured_b = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(4),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(95),
+            notes_and_rationale: "Predicts 4 instructions for even input path based solely on static disassembly.".to_string(),
+        };
+
+        if let Ok(record_b) = ManualTrialSession::register_prediction(
+            &trial_store, &packet_b, "PRED-DEMO-TRL-001", "Manual-Human-Expert",
+            "Predicted 4 instructions for even input path based solely on static disassembly.",
+            structured_b, "2026-11-17T12:05:00Z"
+        ) {
+            println!("Independent Prediction Registered (Frozen State): `{}`", record_b.prediction_id());
+            println!("- State: `{}`", record_b.state());
+            println!("- Canonical SHA-256: `{}`", record_b.canonical_sha256());
+            println!("- Pre-Disclosure Integrity Verified: `{}`\n", record_b.verify_integrity());
+
+            // Disclose fresh evidence and score
+            let ev_b = NativeTraceEvidence::populate_fresh_trial_evidence().remove(0);
+            if let Ok(exec_b) = ManualTrialSession::disclose_and_evaluate(
+                &trial_store, exp_b, &record_b, Some(&ev_b), "EV-DEMO-TRL-001", "2026-11-17T12:15:00Z", Some(target_debug_exe)
+            ) {
+                println!("{}", exec_b.render_summary());
+            }
+        }
+
+        // Demonstrate tracer capability auditing on unsupported kernel
+        let exp_unsupported = &fresh_exps[2];
+        println!("Tracer Capability Audit for Unsupported Kernel (`{}`):", exp_unsupported.target_kernel_name);
+        match TracerCapabilityAudit::assess_kernel_traceability(&exp_unsupported.target_kernel_name, target_debug_exe) {
+            Ok(_) => println!("- Traceable: true"),
+            Err(limitation) => println!("- Contraindicated / Limitation: {}\n", limitation),
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_trial_dir);
+    }
+
     println!("================================================================================");
-    println!("CAE-1E Phase 4 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1E Phase 5 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }

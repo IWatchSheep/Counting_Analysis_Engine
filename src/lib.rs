@@ -2309,4 +2309,189 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+
+    // --- CAE-1E Phase 5: Independent Prediction Trial Preparation Tests ---
+
+    #[test]
+    fn test_trial_prompt_packet_provenance_and_hash_integrity() {
+        let fresh_exps = ExperimentDefinition::populate_fresh_trial_experiments();
+        assert_eq!(fresh_exps.len(), 3, "Must define exactly 3 fresh trial experiments");
+
+        let exp1 = &fresh_exps[0]; // CAE-1E-TRL-001 (exp-b)
+        let packet = ManualTrialSession::prepare_trial(exp1, "2026-11-17T12:00:00Z");
+
+        assert_eq!(packet.experiment_id, "CAE-1E-TRL-001");
+        assert_eq!(packet.schema_version, "CAE-1E-TRIAL-V1");
+        assert_eq!(packet.prompt_sha256.len(), 64);
+        assert!(packet.verify_integrity(), "Prompt packet must verify its own SHA-256 digest");
+
+        // Verify that mutating the prompt text breaks integrity check
+        let mut tampered = packet.clone();
+        tampered.prompt_markdown_text.push_str("LEAKED_TRACE_DATA");
+        assert!(!tampered.verify_integrity(), "Tampered prompt text must fail hash integrity check");
+
+        // Verify that prompt contains no execution trace metrics
+        assert!(!packet.prompt_markdown_text.contains("observed_instruction_counts"));
+        assert!(!packet.prompt_markdown_text.contains("loop_header_backedges_observed"));
+    }
+
+    #[test]
+    fn test_physical_executable_sha256_computation_and_verification() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        if !debug_exe.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--bin", "cae_trace_target"])
+                .status()
+                .expect("Failed to build cae_trace_target");
+            assert!(status.success());
+        }
+
+        // 1. Compute physical file hash
+        let exe_hash = compute_file_sha256(debug_exe).expect("Computing physical file SHA-256 must succeed");
+        assert_eq!(exe_hash.len(), 64);
+
+        // 2. Verified match
+        let mut ev_matching = NativeTraceEvidence::populate_fresh_trial_evidence().remove(0);
+        ev_matching.target_executable_sha256 = Some(exe_hash.clone());
+        assert!(ev_matching.verify_executable_identity(debug_exe).expect("Identity check should succeed"));
+
+        // 3. Tampered / mismatched hash
+        let mut ev_mismatched = ev_matching.clone();
+        ev_mismatched.target_executable_sha256 = Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
+        assert!(!ev_mismatched.verify_executable_identity(debug_exe).expect("Identity check should succeed"));
+    }
+
+    #[test]
+    fn test_manual_trial_session_complete_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("cae_trial_session_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let fresh_exps = ExperimentDefinition::populate_fresh_trial_experiments();
+        let exp1 = &fresh_exps[0]; // exp-b
+        store.save_experiment(exp1).expect("Save experiment must succeed");
+
+        // Step 1: Prepare trial prompt packet
+        let packet = ManualTrialSession::prepare_trial(exp1, "2026-11-17T12:00:00Z");
+        assert!(packet.verify_integrity());
+
+        // Step 2: Register independent prediction (manual operator input)
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(4),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(95),
+            notes_and_rationale: "Predicts 4 instructions for even input path.".to_string(),
+        };
+
+        let record = ManualTrialSession::register_prediction(
+            &store,
+            &packet,
+            "PRED-TRL-001",
+            "Manual-Human-Expert",
+            "Predicted 4 instructions for even input path based solely on static disassembly.",
+            structured,
+            "2026-11-17T12:05:00Z",
+        ).expect("Registering independent prediction must succeed");
+
+        assert_eq!(record.state(), PredictionState::Frozen);
+        assert!(record.verify_integrity());
+        let frozen_hash = record.canonical_sha256().to_string();
+
+        // Step 3: Disclose evidence and evaluate
+        let evidence = NativeTraceEvidence::populate_fresh_trial_evidence().remove(0);
+        let exec = ManualTrialSession::disclose_and_evaluate(
+            &store,
+            exp1,
+            &record,
+            Some(&evidence),
+            "EV-TRL-001",
+            "2026-11-17T12:15:00Z",
+            None,
+        ).expect("Disclose and evaluate must succeed");
+
+        assert_eq!(exec.final_prediction_state, PredictionState::Archived);
+        assert!(exec.post_archival_integrity_verified);
+        assert_eq!(exec.frozen_canonical_sha256, frozen_hash);
+
+        // Reload from store
+        let reloaded = store.load_prediction("PRED-TRL-001").expect("Reload prediction must succeed");
+        assert_eq!(reloaded.state(), PredictionState::Archived);
+        assert_eq!(reloaded.canonical_sha256(), frozen_hash);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tracer_capability_audit_detects_unsupported_kernels_without_extrapolation() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+
+        // 1. Audit supported kernel (exp-b)
+        assert!(TracerCapabilityAudit::assess_kernel_traceability("exp-b", debug_exe).is_ok());
+
+        // 2. Audit unsupported kernel (unsupported_kernel)
+        let err = TracerCapabilityAudit::assess_kernel_traceability("unsupported_kernel", debug_exe);
+        assert!(matches!(err, Err(TracerLimitation::UnsupportedKernel(_))));
+
+        // 3. End-to-end evaluation with unsupported kernel: must emit UnsupportedEvaluation with limitation explanation
+        let temp_dir = std::env::temp_dir().join(format!("cae_tracer_limit_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let store = DurablePredictionStore::new(&temp_dir).expect("Store creation must succeed");
+
+        let fresh_exps = ExperimentDefinition::populate_fresh_trial_experiments();
+        let exp3 = &fresh_exps[2]; // unsupported_kernel
+        store.save_experiment(exp3).expect("Save experiment must succeed");
+
+        let packet = ManualTrialSession::prepare_trial(exp3, "2026-11-17T12:00:00Z");
+        let structured = StructuredPrediction {
+            instruction_count: InstructionCountHypothesis::Constant(10),
+            loop_branch: LoopBranchHypothesis::StraightLine,
+            register_roles: vec![],
+            confidence_percent: Some(50),
+            notes_and_rationale: "Hypothesis for unsupported kernel.".to_string(),
+        };
+
+        let record = ManualTrialSession::register_prediction(
+            &store,
+            &packet,
+            "PRED-UNSUPPORTED",
+            "Model-Explorer",
+            "Speculative prediction for unsupported kernel.",
+            structured,
+            "2026-11-17T12:05:00Z",
+        ).expect("Registering prediction must succeed");
+
+        let exec = ManualTrialSession::disclose_and_evaluate(
+            &store,
+            exp3,
+            &record,
+            None,
+            "EV-UNSUPPORTED",
+            "2026-11-17T12:15:00Z",
+            Some(debug_exe),
+        ).expect("Disclose and evaluate must succeed with UnsupportedEvaluation");
+
+        assert_eq!(exec.evaluation_report.scientific_verdict, ScientificVerdict::UnsupportedEvaluation);
+        assert!(exec.evaluation_report.verdict_explanation.contains("Tracer capability limitation"));
+        assert!(exec.evaluation_report.verdict_explanation.contains("unsupported by isolated tracer"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_fresh_trial_experiments_novelty_controls() {
+        let fresh_exps = ExperimentDefinition::populate_fresh_trial_experiments();
+        let evidence_list = NativeTraceEvidence::populate_fresh_trial_evidence();
+
+        // 1. exp-b (branch parity)
+        let exp_b = &fresh_exps[0];
+        let ev_b = &evidence_list[0];
+        assert_eq!(exp_b.target_kernel_name, "exp-b");
+        assert_eq!(ev_b.test_inputs_evaluated, vec![10, 11]);
+
+        // 2. exp-c (bounded loop sum)
+        let exp_c = &fresh_exps[1];
+        let ev_c = &evidence_list[1];
+        assert_eq!(exp_c.target_kernel_name, "exp-c");
+        assert_eq!(ev_c.test_inputs_evaluated, vec![0, 1, 5]);
+    }
+
 }

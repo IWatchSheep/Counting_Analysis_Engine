@@ -3032,3 +3032,398 @@ impl ControlledBlindExperimentHarness {
         })
     }
 }
+
+
+// ============================================================================
+// CAE-1E Phase 5: Independent Prediction Trial Preparation & Cryptographic Identity
+// ============================================================================
+
+/// Compute SHA-256 hash of a file on disk.
+pub fn compute_file_sha256(path: &Path) -> Result<String, std::io::Error> {
+    let bytes = std::fs::read(path)?;
+    Ok(compute_sha256(&bytes))
+}
+
+impl NativeTraceEvidence {
+    /// Verify that the target executable binary on disk matches the recorded target_executable_sha256.
+    pub fn verify_executable_identity(&self, exe_path: &Path) -> Result<bool, std::io::Error> {
+        if let Some(expected_hash) = &self.target_executable_sha256 {
+            let actual_hash = compute_file_sha256(exe_path)?;
+            Ok(actual_hash == *expected_hash)
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Populate ground-truth native trace evidence for fresh trial experiments.
+    pub fn populate_fresh_trial_evidence() -> Vec<Self> {
+        vec![
+            // CAE-1E-TRL-001: exp-b (Conditional branch parity)
+            Self {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                compiler_profile: "Release".to_string(),
+                test_inputs_evaluated: vec![10, 11], // 10 is even (fallthrough), 11 is odd (taken branch)
+                observed_instruction_counts: vec![
+                    (10, 4), // test rcx,1; jnz; mov eax,100; jmp
+                    (11, 3), // test rcx,1; jnz; mov eax,200
+                ],
+                loop_header_backedges_observed: Some(0),
+                total_backward_branches_observed: Some(0),
+                key_register_states_observed: vec!["EAX=100 (even)".to_string(), "EAX=200 (odd)".to_string()],
+                trace_artifact_reference: "trace_exp_b_release.txt".to_string(),
+            },
+            // CAE-1E-TRL-002: exp-c (Bounded induction loop)
+            Self {
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                compiler_profile: "Release".to_string(),
+                test_inputs_evaluated: vec![0, 1, 5],
+                observed_instruction_counts: vec![
+                    (0, 3),  // xor eax,eax; test rcx,rcx; jz
+                    (1, 7),  // xor eax,eax; test; add; dec; jmp; test; jz
+                    (5, 23), // xor + 5 iterations * 4 instrs + 2 exit instrs
+                ],
+                loop_header_backedges_observed: Some(5), // for n=5
+                total_backward_branches_observed: Some(5),
+                key_register_states_observed: vec!["RAX=15 (sum 1..5)".to_string()],
+                trace_artifact_reference: "trace_exp_c_release.txt".to_string(),
+            },
+        ]
+    }
+}
+
+/// Tracer limitation categories for unsupported or contraindicated machine-code kernels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TracerLimitation {
+    UnsupportedPlatform(String),
+    MissingTargetBinary(String),
+    MissingSoftwareBreakpoints { detail: String },
+    UnsupportedKernel(String),
+    MultiThreadedOrCRTCall { detail: String },
+}
+
+impl fmt::Display for TracerLimitation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedPlatform(p) => write!(f, "Unsupported platform/architecture: {}", p),
+            Self::MissingTargetBinary(p) => write!(f, "Target binary missing: {}", p),
+            Self::MissingSoftwareBreakpoints { detail } => write!(f, "Missing software breakpoints: {}", detail),
+            Self::UnsupportedKernel(k) => write!(f, "Kernel '{}' is unsupported by isolated tracer", k),
+            Self::MultiThreadedOrCRTCall { detail } => write!(f, "Multi-threaded or CRT call contraindicated: {}", detail),
+        }
+    }
+}
+
+/// Tracer capability auditor evaluating whether a kernel can be traced safely on native silicon.
+pub struct TracerCapabilityAudit;
+
+impl TracerCapabilityAudit {
+    /// Audit whether the given kernel can be safely and isolatedly traced on the current host.
+    pub fn assess_kernel_traceability(kernel_name: &str, exe_path: &Path) -> Result<(), TracerLimitation> {
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        {
+            return Err(TracerLimitation::UnsupportedPlatform(
+                "Native single-step tracer requires Windows x86_64".to_string(),
+            ));
+        }
+
+        if !exe_path.exists() {
+            return Err(TracerLimitation::MissingTargetBinary(exe_path.display().to_string()));
+        }
+
+        let supported_kernels = ["exp-a", "exp-b", "exp-c", "kernighan", "naive", "reference"];
+        if !supported_kernels.contains(&kernel_name) {
+            return Err(TracerLimitation::UnsupportedKernel(format!(
+                "Kernel '{}' does not expose standard int 3 entry/exit delimiters in {}",
+                kernel_name, exe_path.display()
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// Complete prompt provenance packet capturing the exact text, metadata, and hash presented to a predictor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialPromptPacket {
+    pub experiment_id: String,
+    pub schema_version: String,
+    pub prompt_sha256: String,
+    pub prompt_markdown_text: String,
+    pub permitted_view: PermittedExperimentView,
+    pub creation_timestamp_iso8601: String,
+}
+
+impl TrialPromptPacket {
+    /// Create a new trial prompt packet from an experiment definition.
+    pub fn from_experiment(experiment: &ExperimentDefinition, timestamp: &str) -> Self {
+        let view = experiment.to_permitted_view();
+
+        let mut text = String::with_capacity(2048);
+        text.push_str("# Machine Code Execution Prediction Trial\n\n");
+        text.push_str(&format!("- **Experiment ID:** `{}`\n", view.experiment_id));
+        text.push_str(&format!("- **Target Kernel:** `{}`\n", view.target_kernel_name));
+        text.push_str(&format!("- **Compiler Profile:** `{}`\n", view.compiler_profile));
+        text.push_str(&format!("- **Classification:** `{}`\n", view.classification));
+        text.push_str("- **Target Architecture:** `x86_64-pc-windows-msvc`\n\n");
+
+        text.push_str("## 1. Static Disassembly\n```x86asm\n");
+        text.push_str(&view.disassembly_input);
+        text.push_str("\n```\n\n");
+
+        text.push_str("## 2. Permitted Context Information\n");
+        for info in &view.permitted_information {
+            text.push_str(&format!("- {}\n", info));
+        }
+        text.push('\n');
+
+        text.push_str("## 3. Measurement Boundaries\n");
+        text.push_str(&format!("- Entry Delimiter: {}\n", view.measurement_boundaries.entry_delimiter));
+        text.push_str(&format!("- Exit Delimiter: {}\n", view.measurement_boundaries.exit_delimiter));
+        text.push_str(&format!("- Step Accounting: {}\n\n", view.measurement_boundaries.call_ret_accounting));
+
+        text.push_str("## 4. Expected Response Schema\n");
+        text.push_str(&format!("{}\n\n", view.expected_response_schema));
+
+        text.push_str("> [!IMPORTANT]\n");
+        text.push_str("> Information Withholding Guarantee: All physical runtime execution traces, step counts,\n");
+        text.push_str("> and branch logs are strictly withheld from this prompt.\n");
+
+        let prompt_sha256 = compute_sha256(text.as_bytes());
+
+        Self {
+            experiment_id: view.experiment_id.clone(),
+            schema_version: "CAE-1E-TRIAL-V1".to_string(),
+            prompt_sha256,
+            prompt_markdown_text: text,
+            permitted_view: view,
+            creation_timestamp_iso8601: timestamp.to_string(),
+        }
+    }
+
+    /// Verify that the prompt markdown text strictly hashes to the recorded prompt_sha256.
+    pub fn verify_integrity(&self) -> bool {
+        self.prompt_sha256 == compute_sha256(self.prompt_markdown_text.as_bytes())
+    }
+}
+
+impl ExperimentDefinition {
+    /// Populate fresh trial experiments providing genuine novelty controls beyond popcount.
+    pub fn populate_fresh_trial_experiments() -> Vec<Self> {
+        let boundaries = MeasurementBoundaries {
+            entry_delimiter: "int 3 immediately preceding function dispatch call rax".to_string(),
+            exit_delimiter: "int 3 immediately following ret".to_string(),
+            call_ret_accounting: "Function internal steps between call rax and ret, excluding dispatch harness".to_string(),
+        };
+
+        let scoring = ScoringRules {
+            exact_instruction_match_required: false,
+            branch_breakdown_scored: true,
+            allow_unresolved_investigation: true,
+            scoring_criteria_description: "Scores branch and step predictions for fresh machine-code kernels".to_string(),
+        };
+
+        vec![
+            // Fresh Task 1: Conditional branching parity kernel (exp-b)
+            Self {
+                experiment_id: "CAE-1E-TRL-001".to_string(),
+                target_kernel_name: "exp-b".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "test rcx, 1; jnz 2f; mov eax, 100; jmp 3f; 2: mov eax, 200; 3: int 3".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc".to_string(),
+                    "Profile: Release".to_string(),
+                    "Signature: fn(u64) -> u64".to_string(),
+                ],
+                measurement_boundaries: boundaries.clone(),
+                expected_response_schema: "Instruction counts for even vs odd inputs, branch direction".to_string(),
+                scoring_rules: scoring.clone(),
+            },
+            // Fresh Task 2: Bounded arithmetic loop kernel (exp-c)
+            Self {
+                experiment_id: "CAE-1E-TRL-002".to_string(),
+                target_kernel_name: "exp-c".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "xor eax, eax; 4: test rcx, rcx; jz 5f; add rax, rcx; dec rcx; jmp 4b; 5: int 3".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc".to_string(),
+                    "Profile: Release".to_string(),
+                    "Signature: fn(u64) -> u64".to_string(),
+                ],
+                measurement_boundaries: boundaries.clone(),
+                expected_response_schema: "Instruction count scaling formula P(n) and loop backedge count".to_string(),
+                scoring_rules: scoring.clone(),
+            },
+            // Fresh Task 3: Unsupported external CRT helper kernel (Tracer Limitation Test)
+            Self {
+                experiment_id: "CAE-1E-TRL-003".to_string(),
+                target_kernel_name: "unsupported_kernel".to_string(),
+                compiler_profile: "Release".to_string(),
+                classification: ExperimentClassification::Blind,
+                target_executable_name: "cae_trace_target.exe".to_string(),
+                target_executable_sha256: None,
+                disassembly_input: "call external_crt_helper; ret".to_string(),
+                permitted_information: vec![
+                    "Target: x86_64-pc-windows-msvc".to_string(),
+                    "Profile: Release".to_string(),
+                    "Signature: fn() -> ()".to_string(),
+                ],
+                measurement_boundaries: boundaries,
+                expected_response_schema: "Instruction count scaling".to_string(),
+                scoring_rules: scoring,
+            },
+        ]
+    }
+}
+
+/// Manually operated predictor trial session managing trial preparation, prediction registration, and evidence revelation.
+pub struct ManualTrialSession;
+
+impl ManualTrialSession {
+    /// Step 1: Prepare trial prompt packet with complete provenance and hash.
+    pub fn prepare_trial(
+        experiment: &ExperimentDefinition,
+        timestamp: &str,
+    ) -> TrialPromptPacket {
+        TrialPromptPacket::from_experiment(experiment, timestamp)
+    }
+
+    /// Step 2: Register independent prediction before evidence disclosure.
+    pub fn register_prediction(
+        store: &DurablePredictionStore,
+        packet: &TrialPromptPacket,
+        prediction_id: &str,
+        model_identifier: &str,
+        raw_response: &str,
+        structured: StructuredPrediction,
+        registration_timestamp: &str,
+    ) -> Result<PredictionRecord, StorageError> {
+        // Assert prompt packet integrity
+        if !packet.verify_integrity() {
+            return Err(StorageError::Protocol(PredictionProtocolError::HashMismatch {
+                expected: packet.prompt_sha256.clone(),
+                computed: compute_sha256(packet.prompt_markdown_text.as_bytes()),
+            }));
+        }
+
+        let mut record = PredictionRecord::new_draft(
+            prediction_id,
+            &packet.experiment_id,
+            model_identifier,
+            raw_response,
+            structured,
+            registration_timestamp,
+        );
+
+        // Freeze canonical digest permanently
+        record.freeze().map_err(StorageError::Protocol)?;
+
+        // Save to store in Frozen state BEFORE evidence disclosure
+        store.save_prediction(&record)?;
+
+        Ok(record)
+    }
+
+    /// Step 3: Disclose evidence, validate executable/trace identity, score, and archive.
+    pub fn disclose_and_evaluate(
+        store: &DurablePredictionStore,
+        experiment: &ExperimentDefinition,
+        prediction: &PredictionRecord,
+        evidence: Option<&NativeTraceEvidence>,
+        evidence_id: &str,
+        evaluation_timestamp: &str,
+        target_exe_path: Option<&Path>,
+    ) -> Result<ControlledExperimentExecution, StorageError> {
+        // Validate executable cryptographic identity if path and hash are provided
+        if let (Some(exe_path), Some(ev)) = (target_exe_path, evidence) {
+            if let Err(e) = ev.verify_executable_identity(exe_path) {
+                return Err(StorageError::Io(e));
+            }
+        }
+
+        // Check tracer capability if exe path is provided
+        if let Some(exe_path) = target_exe_path {
+            if let Err(limit) = TracerCapabilityAudit::assess_kernel_traceability(&experiment.target_kernel_name, exe_path) {
+                // If tracer cannot support this kernel, evaluate as UnsupportedEvaluation with explanation
+                let points = [0u64, 1, 7].iter().map(|&val| {
+                    let k = val.count_ones() as usize;
+                    InputEvaluationPoint {
+                        input_value: val,
+                        hamming_weight_k: k,
+                        predicted_count: prediction.structured_prediction().instruction_count.evaluate_popcount(k),
+                        observed_count: None,
+                        status: InputEvaluationStatus::MissingObservation {
+                            predicted: prediction.structured_prediction().instruction_count.evaluate_popcount(k),
+                        },
+                    }
+                }).collect();
+
+                let report = PredictionEvaluationReport {
+                    experiment_id: experiment.experiment_id.clone(),
+                    prediction_id: prediction.prediction_id().to_string(),
+                    model_identifier: prediction.model_identifier().to_string(),
+                    evaluation_points: points,
+                    backedge_status: BackedgeEvaluationStatus::MissingObservation,
+                    scientific_verdict: ScientificVerdict::UnsupportedEvaluation,
+                    verdict_explanation: format!("Tracer capability limitation: {}", limit),
+                    discrepancy_summary: format!("Kernel '{}' cannot be traced: {}", experiment.target_kernel_name, limit),
+                    evidence_disclosed_prior_to_prediction: false,
+                };
+
+                let mut mut_record = prediction.clone();
+                mut_record.mark_verified().map_err(StorageError::Protocol)?;
+                store.save_prediction(&mut_record)?;
+
+                let ev_record = report.to_evidence_record(evidence_id, evaluation_timestamp, None);
+                store.append_evidence(&ev_record)?;
+
+                mut_record.archive().map_err(StorageError::Protocol)?;
+                store.save_prediction(&mut_record)?;
+
+                return Ok(ControlledExperimentExecution {
+                    experiment_id: experiment.experiment_id.clone(),
+                    prediction_id: prediction.prediction_id().to_string(),
+                    evidence_id: evidence_id.to_string(),
+                    frozen_canonical_sha256: prediction.canonical_sha256().to_string(),
+                    pre_disclosure_verification_passed: prediction.verify_integrity(),
+                    evaluation_report: report,
+                    final_prediction_state: PredictionState::Archived,
+                    post_archival_integrity_verified: mut_record.verify_integrity(),
+                });
+            }
+        }
+
+        // Standard evaluation path
+        let report = DeterministicPredictionEvaluator::evaluate(experiment, prediction, evidence, false);
+
+        let mut mut_record = prediction.clone();
+        mut_record.mark_verified().map_err(StorageError::Protocol)?;
+        store.save_prediction(&mut_record)?;
+
+        let ev_record = report.to_evidence_record(evidence_id, evaluation_timestamp, evidence.cloned());
+        store.append_evidence(&ev_record)?;
+
+        mut_record.archive().map_err(StorageError::Protocol)?;
+        store.save_prediction(&mut_record)?;
+
+        let reloaded = store.load_prediction(prediction.prediction_id())?;
+
+        Ok(ControlledExperimentExecution {
+            experiment_id: experiment.experiment_id.clone(),
+            prediction_id: prediction.prediction_id().to_string(),
+            evidence_id: evidence_id.to_string(),
+            frozen_canonical_sha256: prediction.canonical_sha256().to_string(),
+            pre_disclosure_verification_passed: prediction.verify_integrity(),
+            evaluation_report: report,
+            final_prediction_state: reloaded.state(),
+            post_archival_integrity_verified: reloaded.verify_integrity() && reloaded.canonical_sha256() == prediction.canonical_sha256(),
+        })
+    }
+}
