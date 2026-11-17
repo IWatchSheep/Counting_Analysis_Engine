@@ -8,6 +8,7 @@
 //! - Exit Trigger: `int 3` (`0xCC`)
 
 use std::env;
+use Counting_Analysis_Engine::algorithms::popcount_kernighan;
 
 #[inline(never)]
 #[cfg(target_arch = "x86_64")]
@@ -75,11 +76,31 @@ unsafe fn run_kernel_c(input: u64) -> u64 {
     result
 }
 
+#[inline(never)]
+#[cfg(target_arch = "x86_64")]
+unsafe fn run_kernel_kernighan(input: u64) -> u32 {
+    let result: u32;
+    unsafe {
+        core::arch::asm!(
+            "sub rsp, 40",
+            "int 3",            // Entry Trigger
+            "call {fn_ptr}",    // Call live compiled popcount_kernighan
+            "int 3",            // Exit Trigger
+            "add rsp, 40",
+            in("rcx") input,
+            fn_ptr = in(reg) popcount_kernighan as *const (),
+            lateout("eax") result,
+            clobber_abi("C"),
+        );
+    }
+    result
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: cae_trace_target <kernel_name> [input_value]");
-        eprintln!("Available kernels: exp-a, exp-b, exp-c");
+        eprintln!("Available kernels: exp-a, exp-b, exp-c, kernighan");
         return;
     }
 
@@ -107,6 +128,10 @@ fn main() {
             }
             "exp-c" => {
                 let res = run_kernel_c(input);
+                println!("RESULT: {}", res);
+            }
+            "kernighan" => {
+                let res = run_kernel_kernighan(input);
                 println!("RESULT: {}", res);
             }
             other => {

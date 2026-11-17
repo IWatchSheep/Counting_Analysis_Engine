@@ -1,4 +1,4 @@
-//! # Native Hardware Instruction Tracing (CAE-1D Phase 2)
+//! # Native Hardware Instruction Tracing (CAE-1D Phase 2 & Phase 3)
 //!
 //! Provides isolated, out-of-process instruction-by-instruction tracing of
 //! physical machine-code execution on the host CPU using the Windows Debug API.
@@ -16,7 +16,7 @@
 //! 5. **Safe Termination & Budgets:** Enforces instruction execution limits and timeouts,
 //!    ensuring runaways or loops terminate cleanly without hanging.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 
 /// Snapshot of the 64-bit general-purpose CPU registers captured from the debuggee thread context.
@@ -63,6 +63,8 @@ impl NativeTraceFlags {
 }
 
 /// A single instruction step observed executing on native physical silicon.
+/// Explicitly records machine register and flag states before and after execution,
+/// providing transparent visibility into stack displacement and condition flag transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeTraceStep {
     pub step_index: usize,
@@ -70,7 +72,9 @@ pub struct NativeTraceStep {
     pub mnemonic: String,
     pub operands_str: String,
     pub bytes: Vec<u8>,
+    pub rsp_before: u64,
     pub registers_after: NativeTraceRegisters,
+    pub flags_before: NativeTraceFlags,
     pub flags_after: NativeTraceFlags,
 }
 
@@ -99,6 +103,38 @@ pub struct NativeTraceReport {
 }
 
 impl NativeTraceReport {
+    /// Count the number of backwards branch instructions executed (loop backedges).
+    pub fn count_loop_backedges(&self) -> usize {
+        let mut count = 0;
+        for i in 0..self.steps.len().saturating_sub(1) {
+            let current = &self.steps[i];
+            let next = &self.steps[i + 1];
+            // If the next instruction address is lower than current instruction address
+            // and current mnemonic is a jump/branch, this is a loop backedge.
+            if next.address < current.address
+                && (current.mnemonic.starts_with('j') || current.mnemonic == "loop")
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Extract the callee instructions (excluding the caller dispatch `call` if present).
+    pub fn function_instructions(&self) -> &[NativeTraceStep] {
+        if let Some(first) = self.steps.first()
+            && first.mnemonic == "call"
+        {
+            return &self.steps[1..];
+        }
+        &self.steps
+    }
+
+    /// Number of function-internal instructions executed (excluding caller dispatch `call`).
+    pub fn function_instruction_count(&self) -> usize {
+        self.function_instructions().len()
+    }
+
     pub fn render_summary(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
@@ -107,12 +143,21 @@ impl NativeTraceReport {
         ));
         out.push_str(&format!("- **Observation Mechanism:** {}\n", self.trace_mechanism));
         out.push_str(&format!("- **Total Hardware Instructions Observed:** `{}`\n", self.total_observed_instructions));
+        if let Some(first) = self.steps.first()
+            && first.mnemonic == "call"
+        {
+            out.push_str(&format!(
+                "- **Instruction Decomposition:** `1` dispatch call + `{}` callee instructions\n",
+                self.function_instruction_count()
+            ));
+        }
+        out.push_str(&format!("- **Loop Backedges Observed on Silicon:** `{}`\n", self.count_loop_backedges()));
         out.push_str(&format!("- **Final Return Value (RAX):** `{}` (0x{:X})\n", self.return_value_rax, self.return_value_rax));
         out.push_str(&format!("- **Final Condition Flags:** ZF={}, CF={}, SF={}, OF={}\n",
             self.final_flags.zf as u8, self.final_flags.cf as u8, self.final_flags.sf as u8, self.final_flags.of as u8));
         out.push_str(&format!("- **Trace Status:** `{:?}`\n\n", self.status));
 
-        out.push_str("| Step | Address | Machine Code | Instruction | RAX | RCX | RDX | RSP | ZF | CF |\n");
+        out.push_str("| Step | Address | Machine Code | Instruction | RSP (before) | RSP (after) | RAX (after) | ZF (before) | ZF (after) | CF (after) |\n");
         out.push_str("| :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n");
 
         for step in self.steps.iter().take(25) {
@@ -123,16 +168,16 @@ impl NativeTraceReport {
                 .collect::<Vec<_>>()
                 .join(" ");
             out.push_str(&format!(
-                "| `{}` | `0x{:08X}` | `{}` | `{} {}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `{}` | `{}` |\n",
+                "| `{}` | `0x{:08X}` | `{}` | `{} {}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `{}` | `{}` | `{}` |\n",
                 step.step_index,
                 step.address,
                 byte_str,
                 step.mnemonic,
                 step.operands_str,
-                step.registers_after.rax,
-                step.registers_after.rcx,
-                step.registers_after.rdx,
+                step.rsp_before,
                 step.registers_after.rsp,
+                step.registers_after.rax,
+                step.flags_before.zf as u8,
                 step.flags_after.zf as u8,
                 step.flags_after.cf as u8,
             ));
@@ -151,16 +196,16 @@ impl NativeTraceReport {
                     .collect::<Vec<_>>()
                     .join(" ");
                 out.push_str(&format!(
-                    "| `{}` | `0x{:08X}` | `{}` | `{} {}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `{}` | `{}` |\n",
+                    "| `{}` | `0x{:08X}` | `{}` | `{} {}` | `0x{:X}` | `0x{:X}` | `0x{:X}` | `{}` | `{}` | `{}` |\n",
                     last.step_index,
                     last.address,
                     byte_str,
                     last.mnemonic,
                     last.operands_str,
-                    last.registers_after.rax,
-                    last.registers_after.rcx,
-                    last.registers_after.rdx,
+                    last.rsp_before,
                     last.registers_after.rsp,
+                    last.registers_after.rax,
+                    last.flags_before.zf as u8,
                     last.flags_after.zf as u8,
                     last.flags_after.cf as u8,
                 ));
@@ -217,6 +262,117 @@ impl FourTierComparison {
                 delta_str,
                 r.status,
                 r.structural_notes,
+            ));
+        }
+
+        out
+    }
+}
+
+/// 5-Tier Popcount Comparison Record across all analysis tiers:
+/// Tier 1: Source Operations (Instrumented algorithm)
+/// Tier 2: Static Assembly Instructions (iced-x86 disassembled binary footprint)
+/// Tier 3: Model-Estimated Dynamic Instructions (analytical basic-block path formula)
+/// Tier 4: Emulator-Observed Dynamic Instructions (micro-emulator path trace)
+/// Tier 5: Native Debugger-Observed Dynamic Instruction Events (physical host CPU single-stepping)
+#[derive(Debug, Clone)]
+pub struct FiveTierPopcountComparison {
+    pub workload_name: &'static str,
+    pub input_value: u64,
+    pub popcount_result: u32,
+    pub profile: &'static str,
+    pub tier1_source_ops: usize,
+    pub tier2_static_instructions: usize,
+    /// Tier 3 Original Model Prediction from CAE-1C (step_count_kernighan = 9 + 13*k)
+    pub tier3_original_prediction: usize,
+    pub tier4_emulator_dynamic: Option<usize>,
+    pub tier5_native_hardware_total: usize,
+    pub tier5_function_internal: usize,
+    pub loop_backedges_observed: usize,
+    pub reconciliation_notes: &'static str,
+}
+
+/// Audit comparison record distinguishing original predictions from trace-fitted models:
+/// 1. Original Prediction: Independently generated model prior to native execution (CAE-1C `step_count_kernighan`).
+/// 2. Observed Native Silicon: Actual instruction counts captured via physical single-stepping.
+/// 3. Revised Model: Causal model derived after examining native trace evidence.
+/// 4. Discrepancy & Explanation: Mathematical difference and architectural cause connecting them.
+#[derive(Debug, Clone)]
+pub struct PopcountModelAuditComparison {
+    pub workload_name: &'static str,
+    pub input_value: u64,
+    pub popcount_result: u32,
+    pub profile: &'static str,
+    pub original_model_prediction: usize,
+    pub observed_native_internal: usize,
+    pub observed_native_total: usize,
+    pub revised_trace_model: usize,
+    pub discrepancy: isize,
+    pub explanation: &'static str,
+}
+
+impl PopcountModelAuditComparison {
+    pub fn render_markdown_table(rows: &[Self]) -> String {
+        let mut out = String::new();
+        out.push_str("### Scientific Audit: Independent Prediction vs. Native Observation vs. Trace-Fitted Model\n\n");
+        out.push_str("| Workload | Input | Result | Profile | Original Prediction (CAE-1C) | Observed Native (Internal) | Observed Native (w/ Call) | Revised Model (CAE-1D) | Discrepancy (Obs - Pred) | Architectural Explanation |\n");
+        out.push_str("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |\n");
+
+        for r in rows {
+            let disc_str = if r.discrepancy > 0 {
+                format!("`+{}`", r.discrepancy)
+            } else if r.discrepancy == 0 {
+                "`0 (Exact Match)`".to_string()
+            } else {
+                format!("`{}`", r.discrepancy)
+            };
+
+            out.push_str(&format!(
+                "| **{}** | `0x{:016X}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} |\n",
+                r.workload_name,
+                r.input_value,
+                r.popcount_result,
+                r.profile,
+                r.original_model_prediction,
+                r.observed_native_internal,
+                r.observed_native_total,
+                r.revised_trace_model,
+                disc_str,
+                r.explanation,
+            ));
+        }
+
+        out
+    }
+}
+
+impl FiveTierPopcountComparison {
+    pub fn render_markdown_table(rows: &[Self]) -> String {
+        let mut out = String::new();
+        out.push_str("### 5-Tier Popcount Execution Comparison: Source vs. Static vs. Original Model vs. Emulator vs. Native Silicon\n\n");
+        out.push_str("| Workload | Input | Result | Profile | T1 Source Ops | T2 Static | T3 Original Model (CAE-1C) | T4 Emulator | T5 Native Total (w/ Call) | T5 Internal (Callee) | Loop Backedges | Reconciliation Notes |\n");
+        out.push_str("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |\n");
+
+        for r in rows {
+            let emu_str = match r.tier4_emulator_dynamic {
+                Some(s) => format!("`{}`", s),
+                None => "`Deferred`".to_string(),
+            };
+
+            out.push_str(&format!(
+                "| **{}** | `0x{:016X}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | `{}` | `{}` | `{}` | {} |\n",
+                r.workload_name,
+                r.input_value,
+                r.popcount_result,
+                r.profile,
+                r.tier1_source_ops,
+                r.tier2_static_instructions,
+                r.tier3_original_prediction,
+                emu_str,
+                r.tier5_native_hardware_total,
+                r.tier5_function_internal,
+                r.loop_backedges_observed,
+                r.reconciliation_notes,
             ));
         }
 
@@ -300,6 +456,15 @@ struct DebugEvent {
 
 #[cfg(windows)]
 #[repr(C)]
+struct ProcessInformation {
+    h_process: *mut std::ffi::c_void,
+    h_thread: *mut std::ffi::c_void,
+    dw_process_id: u32,
+    dw_thread_id: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
 struct StartupInfoW {
     cb: u32,
     lp_reserved: *mut u16,
@@ -322,15 +487,6 @@ struct StartupInfoW {
 }
 
 #[cfg(windows)]
-#[repr(C)]
-struct ProcessInformation {
-    h_process: *mut std::ffi::c_void,
-    h_thread: *mut std::ffi::c_void,
-    dw_process_id: u32,
-    dw_thread_id: u32,
-}
-
-#[cfg(windows)]
 unsafe extern "system" {
     fn CreateProcessW(
         lp_application_name: *const u16,
@@ -347,6 +503,8 @@ unsafe extern "system" {
 
     fn WaitForDebugEvent(lp_debug_event: *mut DebugEvent, dw_milliseconds: u32) -> i32;
     fn ContinueDebugEvent(dw_process_id: u32, dw_thread_id: u32, dw_continue_status: u32) -> i32;
+    fn TerminateProcess(h_process: *mut std::ffi::c_void, u_exit_code: u32) -> i32;
+    fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
     fn OpenThread(dw_desired_access: u32, b_inherit_handle: i32, dw_thread_id: u32) -> *mut std::ffi::c_void;
     fn GetThreadContext(h_thread: *mut std::ffi::c_void, lp_context: *mut ContextRecord) -> i32;
     fn SetThreadContext(h_thread: *mut std::ffi::c_void, lp_context: *const ContextRecord) -> i32;
@@ -357,34 +515,33 @@ unsafe extern "system" {
         n_size: usize,
         lp_number_of_bytes_read: *mut usize,
     ) -> i32;
-    fn TerminateProcess(h_process: *mut std::ffi::c_void, u_exit_code: u32) -> i32;
-    fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
 }
 
-/// Discovers the path to `cae_trace_target.exe`.
+/// Discovers the path to the `cae_trace_target.exe` binary.
 pub fn locate_target_binary() -> Result<PathBuf, String> {
-    // 1. Cargo integration test environment variable
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_cae_trace_target") {
-        let p = PathBuf::from(path);
+    // 1. Check CARGO_BIN_EXE_cae_trace_target environment variable (set during cargo test)
+    if let Ok(cargo_bin) = std::env::var("CARGO_BIN_EXE_cae_trace_target") {
+        let p = PathBuf::from(cargo_bin);
         if p.exists() {
             return Ok(p);
         }
     }
 
     // 2. Relative to current executable directory
-    if let Ok(curr) = std::env::current_exe()
-        && let Some(parent) = curr.parent() {
-            let candidate1 = parent.join("cae_trace_target.exe");
-            if candidate1.exists() {
-                return Ok(candidate1);
-            }
-            if let Some(grandparent) = parent.parent() {
-                let candidate2 = grandparent.join("cae_trace_target.exe");
-                if candidate2.exists() {
-                    return Ok(candidate2);
-                }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let candidate1 = parent.join("cae_trace_target.exe");
+        if candidate1.exists() {
+            return Ok(candidate1);
+        }
+        if let Some(grandparent) = parent.parent() {
+            let candidate2 = grandparent.join("cae_trace_target.exe");
+            if candidate2.exists() {
+                return Ok(candidate2);
             }
         }
+    }
 
     // 3. Known project build directories
     let candidates = [
@@ -415,6 +572,17 @@ impl WindowsNativeDebugger {
         execution_budget: usize,
     ) -> Result<NativeTraceReport, String> {
         let target_exe = locate_target_binary()?;
+        Self::trace_kernel_with_exe(&target_exe, kernel_name, input_value, execution_budget)
+    }
+
+    /// Traces the given micro-kernel with an explicitly specified target executable binary.
+    #[cfg(windows)]
+    pub fn trace_kernel_with_exe(
+        target_exe: &Path,
+        kernel_name: &str,
+        input_value: u64,
+        execution_budget: usize,
+    ) -> Result<NativeTraceReport, String> {
         let target_path_str = target_exe.to_string_lossy().to_string();
 
         let cmd_line_str = format!("\"{}\" {} {}", target_path_str, kernel_name, input_value);
@@ -470,6 +638,7 @@ impl WindowsNativeDebugger {
         let mut in_kernel = false;
         let mut trace_completed = false;
         let mut last_rip: u64 = 0;
+        let mut last_context = ContextRecord::default();
         let mut steps = Vec::new();
         let mut final_context = ContextRecord::default();
         let mut status = NativeTraceStatus::CompletedSuccess;
@@ -545,6 +714,7 @@ impl WindowsNativeDebugger {
                             // Entry Trigger breakpoint reached inside target image!
                             in_kernel = true;
                             last_rip = ctx.rip; // ctx.rip points right after INT3 to the first instruction
+                            last_context = ctx;
 
                             // Enable Trap Flag (TF = 0x100) to single-step on physical CPU
                             ctx.eflags |= 0x100;
@@ -602,7 +772,9 @@ impl WindowsNativeDebugger {
                                 mnemonic,
                                 operands_str: operands,
                                 bytes: instr_bytes,
+                                rsp_before: last_context.rsp,
                                 registers_after: regs_after,
+                                flags_before: NativeTraceFlags::from_eflags(last_context.eflags),
                                 flags_after,
                             });
                         }
@@ -630,6 +802,7 @@ impl WindowsNativeDebugger {
                         } else {
                             // Re-arm hardware Trap Flag for the next step
                             last_rip = ctx.rip;
+                            last_context = ctx;
                             ctx.eflags |= 0x100;
                             if !h_thread.is_null() {
                                 unsafe { SetThreadContext(h_thread, &ctx); }
@@ -667,6 +840,7 @@ impl WindowsNativeDebugger {
             "exp-a" => "Straight-Line Instructions",
             "exp-b" => "Conditional Branching",
             "exp-c" => "Bounded Loop Counter",
+            "kernighan" => "Brian Kernighan Popcount (Live Compiled)",
             other => other,
         };
 
@@ -694,6 +868,17 @@ impl WindowsNativeDebugger {
     /// Fallback for non-Windows platforms.
     #[cfg(not(windows))]
     pub fn trace_kernel(
+        _kernel_name: &str,
+        _input_value: u64,
+        _execution_budget: usize,
+    ) -> Result<NativeTraceReport, String> {
+        Err("Native hardware tracing via Windows Debug API is only supported on Windows".to_string())
+    }
+
+    /// Fallback for non-Windows platforms.
+    #[cfg(not(windows))]
+    pub fn trace_kernel_with_exe(
+        _target_exe: &Path,
         _kernel_name: &str,
         _input_value: u64,
         _execution_budget: usize,

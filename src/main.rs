@@ -6,7 +6,11 @@ use Counting_Analysis_Engine::dynamic_analysis::measure_dynamic_kernel;
 use Counting_Analysis_Engine::emulation::{
     MicroExperiments, ModelVsEmulatorComparison, X64MicroEmulator,
 };
-use Counting_Analysis_Engine::native_trace::{FourTierComparison, WindowsNativeDebugger};
+use Counting_Analysis_Engine::dynamic_analysis::step_count_kernighan;
+use Counting_Analysis_Engine::instrumentation::popcount_kernighan_instrumented;
+use Counting_Analysis_Engine::native_trace::{
+    FiveTierPopcountComparison, FourTierComparison, PopcountModelAuditComparison, WindowsNativeDebugger,
+};
 use Counting_Analysis_Engine::report::{SingleInputReport, StaticAssemblyReport, UnifiedThreeTierReport};
 use Counting_Analysis_Engine::static_analysis::disassemble_function_pointer;
 use Counting_Analysis_Engine::verification::{
@@ -410,6 +414,135 @@ fn main() {
         println!("{}", FourTierComparison::render_markdown_table(&four_tier_rows));
     }
 
+    // 9. Native Popcount Algorithm Tracing (CAE-1D Phase 3: Brian Kernighan)
+    println!("--- [Phase 9: Native Popcount Algorithm Tracing (CAE-1D Phase 3: Brian Kernighan)] ---\n");
+    #[cfg(windows)]
+    {
+        println!("Executing isolated native hardware instruction tracing of live compiled `popcount_kernighan`...");
+        println!("Comparing unoptimized Debug (`dev`) build vs. optimized Release (`--release`) build on physical silicon.\n");
+
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+
+        let sample_cases = [
+            ("Zero Bits (k=0)", 0x0000_0000_0000_0000u64),
+            ("Single Bit Set (Sparse: k=1)", 0x0000_0000_0000_0001u64),
+            ("Three Bits Set (k=3)", 0x0000_0000_0000_0007u64),
+            ("Alternating Bits (Balanced: k=32)", 0x5555_5555_5555_5555u64),
+            ("All Bits Set (Dense: k=64)", u64::MAX),
+        ];
+
+        // Print detailed sample traces for k=1 in Debug
+        if debug_exe.exists() {
+            println!("### [Debug Profile Trace Sample: k=1]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", 1, 2000) {
+                println!("{}", rep.render_summary());
+            }
+        }
+
+        // Print detailed sample traces for k=1 in Release
+        if release_exe.exists() {
+            println!("### [Release Profile Trace Sample: k=1]");
+            if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "kernighan", 1, 2000) {
+                println!("{}", rep.render_summary());
+            }
+        }
+
+        let mut five_tier_rows = Vec::new();
+        let mut audit_rows = Vec::new();
+
+        // Debug Profile Rows
+        if debug_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (count, ops) = popcount_kernighan_instrumented(val);
+                let k = count as usize;
+                let total_ops = (ops.loop_iterations + ops.bitwise_ands + ops.arithmetic_subtractions + ops.condition_evaluations + ops.counter_updates) as usize;
+                let original_prediction = step_count_kernighan(val) as usize; // CAE-1C model: 9 + 13*k
+                let revised_model = 8 + 21 * k;
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", val, 2000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Debug (dev)",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 33,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Top-tested loop, 21 instrs/iter with stack spills & overflow checks. Unconditional backedge taken k times.",
+                    });
+
+                    audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Debug (dev)",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model assumed 11 instrs/iter & 9 frame instrs. Unoptimized rustc adds 8 instrs/iter due to stack memory spills/reloads and debug overflow checks on (n-1) and (count+1).",
+                    });
+                }
+            }
+        }
+
+        // Release Profile Rows
+        if release_exe.exists() {
+            for &(name, val) in &sample_cases {
+                let (count, ops) = popcount_kernighan_instrumented(val);
+                let k = count as usize;
+                let total_ops = (ops.loop_iterations + ops.bitwise_ands + ops.arithmetic_subtractions + ops.condition_evaluations + ops.counter_updates) as usize;
+                let original_prediction = step_count_kernighan(val) as usize; // CAE-1C model (debug baseline): 9 + 13*k
+                let revised_model = if k == 0 { 4 } else { 5 + 5 * k };
+
+                if let Ok(rep) = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "kernighan", val, 2000) {
+                    let internal_steps = rep.function_instruction_count();
+                    let discrepancy = internal_steps as isize - original_prediction as isize;
+
+                    five_tier_rows.push(FiveTierPopcountComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Release (opt)",
+                        tier1_source_ops: total_ops,
+                        tier2_static_instructions: 10,
+                        tier3_original_prediction: original_prediction,
+                        tier4_emulator_dynamic: None,
+                        tier5_native_hardware_total: rep.total_observed_instructions,
+                        tier5_function_internal: internal_steps,
+                        loop_backedges_observed: rep.count_loop_backedges(),
+                        reconciliation_notes: "Bottom-tested loop, 5 instrs/iter, zero stack traffic (RCX, EAX, RDX). Conditional backedge taken k-1 times (fallthrough exit).",
+                    });
+
+                    audit_rows.push(PopcountModelAuditComparison {
+                        workload_name: name,
+                        input_value: val,
+                        popcount_result: rep.return_value_rax as u32,
+                        profile: "Release (opt)",
+                        original_model_prediction: original_prediction,
+                        observed_native_internal: internal_steps,
+                        observed_native_total: rep.total_observed_instructions,
+                        revised_trace_model: revised_model,
+                        discrepancy,
+                        explanation: "Original model analyzed debug structure. Optimized compiler removes stack frame, inverts loop to bottom-tested do-while (5 instrs/iter), and keeps state in registers (RCX, EAX, RDX).",
+                    });
+                }
+            }
+        }
+
+        println!("{}", FiveTierPopcountComparison::render_markdown_table(&five_tier_rows));
+        println!("{}", PopcountModelAuditComparison::render_markdown_table(&audit_rows));
+    }
+
     println!("--- [Scientific Limitation & Formal Verification Status] ---\n");
     println!("1. Functional Output Equivalence vs. Intermediate Architectural Bisimulation:");
     println!("   - Current live differential tests verify that for given 64-bit inputs, the emulator's final");
@@ -432,6 +565,6 @@ fn main() {
     println!("     helpers, dynamic link libraries, and complex multi-threaded scheduling.\n");
 
     println!("================================================================================");
-    println!("CAE-1D Phase 2 Milestone Execution Complete. Ready for technical audit.");
+    println!("CAE-1D Phase 3 Milestone Execution Complete. Ready for technical audit.");
     println!("================================================================================");
 }

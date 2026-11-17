@@ -685,4 +685,186 @@ mod tests {
         assert_eq!(report.status, NativeTraceStatus::BudgetExhausted(10));
         assert_eq!(report.total_observed_instructions, 10);
     }
+
+    // --- CAE-1D Phase 3: Native Popcount (Kernighan) Tracing Tests ---
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_kernighan_debug_vectors() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        if !debug_exe.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--bin", "cae_trace_target"])
+                .status()
+                .expect("Failed to build cae_trace_target");
+            assert!(status.success());
+        }
+
+        // In Debug mode (top-tested loop with stack frame):
+        // Formula: Total = 1 + (8 + 21*k), Internal = 8 + 21*k.
+        // Backedges = k (unconditional jmp back to condition check).
+        // Note: Epilogue `add rsp, 48h` updates RFLAGS and clears ZF (RSP != 0).
+        let test_cases = [
+            (0u64, 0u32, 9, 8, 0),                       // k=0: 1+8=9 steps, 0 backedges
+            (1u64, 1u32, 30, 29, 1),                     // k=1: 1+29=30 steps, 1 backedge
+            (7u64, 3u32, 72, 71, 3),                     // k=3: 1+71=72 steps, 3 backedges
+            (0x5555_5555_5555_5555u64, 32u32, 681, 680, 32), // k=32: 1+680=681 steps, 32 backedges
+            (u64::MAX, 64u32, 1353, 1352, 64),           // k=64: 1+1352=1353 steps, 64 backedges
+        ];
+
+        for (input, expected_count, expected_total_steps, expected_internal_steps, expected_backedges) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", input, 2000)
+                .expect("Native trace of kernighan should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            assert_eq!(
+                report.total_observed_instructions, expected_total_steps,
+                "Debug total observed steps mismatch for input 0x{:X}", input
+            );
+            assert_eq!(
+                report.function_instruction_count(), expected_internal_steps,
+                "Debug internal function steps mismatch for input 0x{:X}", input
+            );
+            assert_eq!(
+                report.count_loop_backedges(), expected_backedges,
+                "Debug loop backedges mismatch for input 0x{:X}", input
+            );
+            // Epilogue `add rsp, 48h` clears ZF on physical silicon:
+            assert_eq!(report.final_flags.zf, false, "Epilogue add rsp, 48h clears ZF");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_kernighan_release_vectors() {
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+        if !release_exe.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--release", "--bin", "cae_trace_target"])
+                .status()
+                .expect("Failed to build cae_trace_target --release");
+            assert!(status.success());
+        }
+
+        // In Release mode (bottom-tested loop, no stack frame):
+        // Formula: For k=0: 1+4=5 total, 4 internal, 0 backedges.
+        //          For k>=1: 1+(5+5*k) total, 5+5*k internal, k-1 backedges (fallthrough on final iteration).
+        // Final flag: ZF=true (from test rcx,rcx for k=0, or and rcx,rdx for k>=1).
+        let test_cases = [
+            (0u64, 0u32, 5, 4, 0),                       // k=0: 1+4=5 steps, 0 backedges
+            (1u64, 1u32, 11, 10, 0),                     // k=1: 1+10=11 steps, 0 backedges (fallthrough)
+            (7u64, 3u32, 21, 20, 2),                     // k=3: 1+20=21 steps, 2 backedges
+            (0x5555_5555_5555_5555u64, 32u32, 166, 165, 31), // k=32: 1+165=166 steps, 31 backedges
+            (u64::MAX, 64u32, 326, 325, 63),             // k=64: 1+325=326 steps, 63 backedges
+        ];
+
+        for (input, expected_count, expected_total_steps, expected_internal_steps, expected_backedges) in test_cases {
+            let report = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "kernighan", input, 2000)
+                .expect("Native trace of kernighan (release) should succeed");
+
+            assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+            assert_eq!(report.return_value_rax as u32, expected_count);
+            assert_eq!(
+                report.total_observed_instructions, expected_total_steps,
+                "Release total observed steps mismatch for input 0x{:X}", input
+            );
+            assert_eq!(
+                report.function_instruction_count(), expected_internal_steps,
+                "Release internal function steps mismatch for input 0x{:X}", input
+            );
+            assert_eq!(
+                report.count_loop_backedges(), expected_backedges,
+                "Release loop backedges mismatch for input 0x{:X}", input
+            );
+            assert_eq!(report.final_flags.zf, true, "ZF must be 1 upon exit in release build");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_rsp_and_flag_transitions_before_and_after() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let report = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", 1, 100)
+            .expect("Native trace of kernighan (k=1) should succeed");
+
+        assert_eq!(report.status, NativeTraceStatus::CompletedSuccess);
+        assert_eq!(report.total_observed_instructions, 30);
+
+        // 1. Verify Step 1: `call` instruction pushes 8-byte return address
+        let step_call = &report.steps[0];
+        assert_eq!(step_call.mnemonic, "call");
+        assert_eq!(step_call.rsp_before - step_call.registers_after.rsp, 8, "CALL must push 8-byte return address");
+
+        // 2. Verify Step 2: `sub rsp, 48h` allocates 72-byte stack frame
+        let step_prologue = &report.steps[1];
+        assert_eq!(step_prologue.mnemonic, "sub");
+        assert_eq!(step_prologue.rsp_before - step_prologue.registers_after.rsp, 72, "Prologue must allocate 72-byte stack frame");
+
+        // 3. Verify Step 29: `add rsp, 48h` deallocates frame AND overwrites condition flag ZF
+        let step_epilogue = &report.steps[28];
+        assert_eq!(step_epilogue.mnemonic, "add");
+        assert_eq!(step_epilogue.registers_after.rsp - step_epilogue.rsp_before, 72, "Epilogue must restore 72 bytes to RSP");
+        assert_eq!(step_epilogue.flags_before.zf, true, "ZF must be 1 from termination check before epilogue add");
+        assert_eq!(step_epilogue.flags_after.zf, false, "Epilogue add rsp, 48h arithmetic must clear ZF");
+
+        // 4. Verify Step 30: `ret` pops 8-byte return address and restores caller RSP
+        let step_ret = &report.steps[29];
+        assert_eq!(step_ret.mnemonic, "ret");
+        assert_eq!(step_ret.registers_after.rsp - step_ret.rsp_before, 8, "RET must pop 8-byte return address");
+        assert_eq!(step_ret.registers_after.rsp, step_call.rsp_before, "RSP must be fully restored to initial caller RSP");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_prediction_vs_observation_scientific_audit() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let release_exe = std::path::Path::new("target/release/cae_trace_target.exe");
+
+        let test_cases = [
+            (0u64, 0usize),
+            (1u64, 1usize),
+            (7u64, 3usize),
+            (0x5555_5555_5555_5555u64, 32usize),
+            (u64::MAX, 64usize),
+        ];
+
+        for (input, k) in test_cases {
+            // Independent CAE-1C Model Prediction (step_count_kernighan = 9 + 13*k)
+            let predicted = step_count_kernighan(input) as usize;
+            assert_eq!(predicted, 9 + 13 * k, "CAE-1C baseline formula invariant");
+
+            // Debug Observation vs Prediction
+            let rep_dbg = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", input, 2000)
+                .expect("Debug trace must succeed");
+            let observed_dbg_internal = rep_dbg.function_instruction_count();
+            let dbg_discrepancy = observed_dbg_internal as isize - predicted as isize;
+            // Analytical discrepancy for debug: (8 + 21*k) - (9 + 13*k) = 8*k - 1
+            let expected_dbg_discrepancy = (8 * k as isize) - 1;
+            assert_eq!(dbg_discrepancy, expected_dbg_discrepancy, "Debug model discrepancy audit for input 0x{:X}", input);
+
+            // Release Observation vs Prediction
+            let rep_rel = WindowsNativeDebugger::trace_kernel_with_exe(release_exe, "kernighan", input, 2000)
+                .expect("Release trace must succeed");
+            let observed_rel_internal = rep_rel.function_instruction_count();
+            let rel_discrepancy = observed_rel_internal as isize - predicted as isize;
+            let expected_rel_discrepancy = if k == 0 {
+                4 - 9 // -5
+            } else {
+                (5 + 5 * k as isize) - (9 + 13 * k as isize) // -8*k - 4
+            };
+            assert_eq!(rel_discrepancy, expected_rel_discrepancy, "Release model discrepancy audit for input 0x{:X}", input);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_native_trace_kernighan_budget_exhaustion() {
+        let debug_exe = std::path::Path::new("target/debug/cae_trace_target.exe");
+        let report = WindowsNativeDebugger::trace_kernel_with_exe(debug_exe, "kernighan", u64::MAX, 50)
+            .expect("Native trace of kernighan with budget 50 should cleanly terminate");
+
+        assert_eq!(report.status, NativeTraceStatus::BudgetExhausted(50));
+        assert_eq!(report.total_observed_instructions, 50);
+    }
 }
